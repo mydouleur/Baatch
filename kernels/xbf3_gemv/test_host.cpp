@@ -45,8 +45,10 @@ int main(int argc, char** argv) {
     if (std::string(argv[i]) == "--experts") exp_override = atol(argv[i+1]);
   }
 
-  auto wts = read_file(dir + "\\wts.bin");
-  auto act = read_file(dir + "\\act.bin");
+  bool split = false;
+  for (int i = 5; i < argc; i++) if (std::string(argv[i]) == "--split") split = true;
+  auto wts = split ? read_file(dir + "\\wtsA.bin") : read_file(dir + "\\wts.bin");
+  auto act = split ? read_file(dir + "\\wtsB.bin") : read_file(dir + "\\act.bin");
   auto ref = verify ? read_file(dir + "\\out_ref.bin") : std::vector<char>();
   auto instr = read_file(insts_path);
   size_t instr_words = instr.size() / 4;
@@ -67,7 +69,8 @@ int main(int argc, char** argv) {
     xrt::bo bo_instr(dev, instr.size(), XCL_BO_FLAGS_CACHEABLE, kernel.group_id(1));
     xrt::bo bo_wts(dev, wts.size(), XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(3));
     xrt::bo bo_act(dev, act.size(), XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(4));
-    xrt::bo bo_out(dev, out_bytes, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(5));
+    // v5: out 在 slot 4（无 act），wtsB 在 slot 4？——v5 ABI: [wtsA, wtsB, out] -> 3,4,5 顺延
+    xrt::bo bo_out(dev, out_bytes, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(split ? 4 + 1 : 5));
 
     memcpy(bo_instr.map(), instr.data(), instr.size());
     memcpy(bo_wts.map(), wts.data(), wts.size());
@@ -84,7 +87,7 @@ int main(int argc, char** argv) {
       run.set_arg(2, (unsigned int)instr_words);
       run.set_arg(3, bo_wts);
       run.set_arg(4, bo_act);
-      run.set_arg(5, bo_out);
+      run.set_arg(split ? 4 : 5, bo_out);
       auto t0 = std::chrono::steady_clock::now();
       run.start();
       run.wait2();

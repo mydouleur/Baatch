@@ -35,6 +35,8 @@ def main():
                     help="v3: split rows across N columns, wts laid out column-major")
     ap.add_argument("--bitplane", action="store_true",
                     help="v4: XBF3-BP 位平面打包 + fp32 相位平面激活")
+    ap.add_argument("--split", action="store_true",
+                    help="v5: 双通道——wtsA.bin=[act块][偶数专家], wtsB.bin=[奇数专家]")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
@@ -65,21 +67,36 @@ def main():
         for k in range(8):
             for sb in range(IN // SB):
                 xp[k, sb, :] = x[sb * SB + 8 * np.arange(32) + k]
-    if a.cols > 1:
+    # act 块内容（v3/v5 共用）：bp 时是 xp 相位平面，否则原始 x
+    act_content = (xp.reshape(-1) if a.bitplane else x)
+    chunk_bytes = 512 * ROW_B   # = L2 块（act 独占一个 L2 块）
+    actpad = np.zeros(chunk_bytes, dtype=np.uint8)
+    actpad[: act_content.nbytes] = act_content.view(np.uint8)
+    if a.cols > 1 and not a.split:
         rpc = OUT // a.cols
         wts = wts.reshape(a.experts, a.cols, rpc * ROW_B)  # [E][col][rows]
         wts = np.transpose(wts, (1, 0, 2)).reshape(-1)     # [col][E][rows]
         # v3：每列 slab = [act 块(chunk_rows*196B, 前 2048B 是 fp32 x)][列权重]
-        chunk_bytes = 512 * ROW_B   # = L2 块（act 独占一个 L2 块）
-        act_content = xp.reshape(-1) if a.bitplane else x   # bp 时 slab 里是相位平面 xp
-        actpad = np.zeros(chunk_bytes, dtype=np.uint8)
-        actpad[: act_content.nbytes] = act_content.view(np.uint8)
         col_bytes = wts.nbytes // a.cols
         slabs = b"".join(
             actpad.tobytes() + wts[c * col_bytes:(c + 1) * col_bytes].tobytes()
             for c in range(a.cols))
         wts = np.frombuffer(slabs, dtype=np.uint8).copy()
-    wts.tofile(os.path.join(a.out, "wts.bin"))
+    if a.split:
+        # 列内已 column-major（[col][E][rows]）；拆偶/奇专家
+        rpc = OUT // a.cols
+        l2 = rpc * ROW_B                      # 一个 L2 块 = 一个专家（每列 512 行）
+        slabA_h = 512 * ROW_B                 # act 块 = 一个 L2 块
+        colA = [] ; colB = []
+        wcols = wts.reshape(a.cols, a.experts, l2) if a.cols > 1 else wts.reshape(1, a.experts, l2)
+        for c in range(a.cols):
+            ev = wcols[c][0::2]; od = wcols[c][1::2]
+            colA.append(actpad.tobytes() + ev.tobytes())
+            colB.append(od.tobytes())
+        np.frombuffer(b"".join(colA), dtype=np.uint8).tofile(os.path.join(a.out, "wtsA.bin"))
+        np.frombuffer(b"".join(colB), dtype=np.uint8).tofile(os.path.join(a.out, "wtsB.bin"))
+    else:
+        wts.tofile(os.path.join(a.out, "wts.bin"))
     xa = np.tile(xp.reshape(-1), a.cols) if a.bitplane and a.cols > 1 else          (xp.reshape(-1) if a.bitplane else (np.tile(x, a.cols) if a.cols > 1 else x))
     xa.tofile(os.path.join(a.out, "act.bin"))
 

@@ -54,8 +54,9 @@ jobs:
             ls -la build_$tag/
           }
           build_one xbf3_gemv_v4.py v4_scalar --core scalar --experts 64 --ncols 4
-          build_one xbf3_gemv_v4.py v4_debug --core debug --experts 1 --ncols 4
           build_one xbf3_gemv_v4.py v4_discard --core discard --experts 64 --ncols 4
+          build_one xbf3_gemv_v5.py v5_discard --core discard --experts 64 --ncols 4
+          build_one xbf3_gemv_v5.py v5_scalar --core scalar --experts 64 --ncols 4
           echo "=== done ==="
 
       - name: Upload artifacts
