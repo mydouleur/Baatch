@@ -76,6 +76,19 @@ jobs:
           CR=64 build_one xbf3_gemv_v5.py v5_scalar --core scalar --experts 64 --ncols 4 --chunk-rows 64 --l2-rows 256
           echo "=== done ==="
 
+      - name: Build npu_w4_gemv (W4A16 GEMV, TileFuse 结构 + Peano)
+        run: |
+          set -x
+          pip install ml_dtypes
+          cd kernels/npu_w4_gemv
+          AIECC=$(python3 -c "from aie.tools import MLIR_AIE_BIN_DIR as b; print(b)")/aiecc
+          AIE_INC=$(python3 -c "from aie.utils import config; print(config.cxx_header_path())")
+          mkdir -p build work
+          "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 -std=c++20             -D__AIE_API_AIE_ADF_HPP__ -Wno-macro-redefined -Wno-unknown-attributes -I"$AIE_INC"             -DDIM_N=64 -DDIM_K=128 -c vm_mix_int4_64x8.cc -o work/vm_64x8.o
+          python3 vector_matrix.py --dev npu2 -N 4096 -K 4096 > work/aie.mlir
+          "$AIECC" --no-compile-host --no-xchesscc --no-xbridge --peano="$PEANO_INSTALL_DIR"             work/aie.mlir --aie-generate-npu-insts --npu-insts-name=build/insts.bin             --aie-generate-pdi --pdi-name=build/design.pdi             --aie-generate-xclbin --xclbin-name=build/unused.xclbin             --tmpdir=work --verbose 2>&1 | tail -60 || true
+          ls -la build/
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -84,4 +97,6 @@ jobs:
           path: |
             kernels/xbf3_gemv/build*/**
             kernels/xbf3_gemv/work*/**
+            kernels/npu_w4_gemv/build*/**
+            kernels/npu_w4_gemv/work*/**
           if-no-files-found: ignore
