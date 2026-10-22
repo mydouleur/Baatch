@@ -39,10 +39,8 @@ jobs:
       - name: Build xbf3_gemv (compile-only, npu2)
         run: |
           cd kernels/xbf3_gemv
-          python3 xbf3_gemv.py --xclbin-path build/xbf3_gemv.xclbin --insts-path build/insts.bin || true
-          find . -name "*.xclbin" -o -name "*.bin" -o -name "*.mlir" | head -20
-          ls -la build/ 2>/dev/null || true
-          exit 1
+          XBF3_DEBUG=1 python3 xbf3_gemv.py --xclbin-path build/xbf3_gemv.xclbin --insts-path build/insts.bin 2>&1 | tail -60
+          find . -name "*.xclbin" -o -name "insts.bin" | head
 
       - name: Upload artifacts
         if: always()

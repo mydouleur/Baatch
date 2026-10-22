@@ -90,6 +90,9 @@ def _make_argparser():
 
 
 def main():
+    import logging, os
+    if os.environ.get("XBF3_DEBUG"):
+        logging.basicConfig(level=logging.DEBUG)
     opts = _make_argparser().parse_args()
     run_design_cli(
         xbf3_gemv,
