@@ -100,7 +100,7 @@ def xbf3_gemv_v2(wts: In, act: In, out: Out, *, experts: CompileTime[int], core_
 
 def _make_argparser():
     p = argparse.ArgumentParser(prog="xbf3_gemv_v2")
-    add_compile_args(p, default_dev="npu2")
+    add_compile_args(p, default_dev="npu2", with_emit_mlir=True)
     p.add_argument("--experts", type=int, default=64)
     p.add_argument("--core", choices=["scalar", "discard"], default="scalar")
     return p
