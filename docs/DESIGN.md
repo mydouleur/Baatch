@@ -113,7 +113,15 @@ Backend：
 
 - **M0**：工具链（Ryzen AI SW / XRT / cardano+peano）+ **带宽探针（纯 DMA 流式，直测理论上限，baseline）** → 标定本机 NPU 带宽
 - **M1' 量化实验室**：旋转 + 校准 + XBF 打包工具链，PPL/HumanEval harness，出档位-质量曲线
-- **M2'**：XBF 的 NPU kernel（单 expert GEMV 打满带宽）
-- **M3'**：全模型 decode + KV cache
+- **M2'**：XBF 的 NPU kernel（单 expert GEMV 打满带宽）——✅ 收官结论：管线 37.6 GB/s（8 列）；**3-bit 计算墙判定结构性**（车道错配 + 无 LUT + 无逐车道移位，v7 掩码选择路线实测否定）；**prefill 不受影响**（unpack 被 batch 摊薄 64×）
+- **M3'**：全模型 decode + KV cache + turbo 分流
 - **M4'**：MTP 投机解码
 - 风险排序：M1' 量化质量 > M2' kernel 学习曲线 > 驱动/工具链成熟度
+
+## 9. 架构级修正（2026-10-22，M2' 实证驱动）：按阶段分工
+
+- **prefill → NPU**：3-bit unpack 成本被 prompt batch 摊薄（每权重 unpack 一次复用 M 次），50 TOPS 满阵列，预期 1500–2500 tok/s
+- **decode → CPU AVX-512（主力）**：3-bit LUT 反量化是 vpermb 主场（IQ3_XXS 的设计原点），Zen5 无车道错配问题；预期 ~50 GB/s → 裸 ~35 tok/s ×MTP ~63
+- NPU decode 仅可选增强：4-bit 部件（attn 投影/lm_head 车道对齐，NPU 算得动）+ CPU 3-bit 专家的混合 decode，理论 ~47 tok/s，M3' 后期实测决定
+- 功耗预期修正：decode ~25–30 W（4 大核 + DRAM），仍远低于纯 CPU 45–55 W；纯 NPU decode 的 12–18 W 目标放弃
+- turbo 含义更新：不再是"NPU+CPU 分流专家"（NPU 算不动 3-bit 专家），而是 decode 期 4-bit/3-bit 部件的 NPU/CPU 分工
