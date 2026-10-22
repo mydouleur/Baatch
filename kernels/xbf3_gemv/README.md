@@ -70,6 +70,38 @@ arg3=wts / arg4=act / arg5=out（按 runtime sequence 操作数顺序 [wts, act,
   （规避每 shim 2 MM2S + 1 S2MM 的通道预算——分离 act fifo 时 AIEPlaceTiles 失败）。
 - 已知限制：act 块独占一个 L2 对象（slab 对齐要求），核内跳过填充块。
 
+### v6/v7 + M2'-5 最终结论（2026-10-22 收官）
+
+**对照测量（64 专家 × 4 列，warm）**：
+
+| 变体 | 每次运行 | 折算权重流 | verify |
+|---|---|---|---|
+| v4 full（位平面+mul/srs 提取+fp32 MAC） | 45.3 ms | 0.57 GB/s | **PASS** |
+| v4 extract_only（只提取） | 8.5 ms | — | — |
+| v4 mac_only（只 MAC+reduce+scale） | 18.8 ms | — | — |
+| v4 discard（纯管线 4 列） | 0.87 ms | 32 GB/s | — |
+| v5 discard（8 列双 fifo） | 0.69 ms | **37.6 GB/s** | — |
+| v6（单 acc/行尾单 reduce 重构） | 54.1 ms | 0.48 GB/s | FAIL（弃） |
+| v7（band+gt+select 二进制平面 GEMV） | 91.7 ms | 0.28 GB/s | **PASS** |
+
+**每核每行周期数**（核心指标）：v4 ≈ 2500 cyc/行；v7 ≈ 5100 cyc/行；v4-extract 段 ≈ 470，mac+reduce+scale 段 ≈ 1040。
+**未达 50 GB/s 目标；最终最好真实计算 = v4 的 0.57 GB/s（PASS）。**
+
+**"3-bit 在 AIE2P 上的极限在哪"——我的最终判断**：
+- 操作级画像：向量 op 有效延迟 ~12 cyc（链式依赖，非吞吐），extract:MAC 指令比 ~10:1，
+  每 sb 的 reduce + 标量软浮点 scale（AIE2P 无标量 FP 单元）是 mac_only 段的大头。
+- 即使提取零成本，现有结构（每 sb reduce + MAC 串行链）也撑不起 >2 GB/s/列；
+  要 50+ GB/s 需要：(a) 每列 4 计算 tile 分摊（4×）、(b) 提取降到 ~1 op/4 值（位平面逐字节比较
+  + MAC 域累加，放弃"先解出数值"的思路）、(c) 管线每列双通道（IRON 1.3.4 的 rt.fill
+  只用 1 个 MM2S 通道/列，已实证）——三者叠加理论上才够到 50 边缘，且每一项都是
+  新一轮 CI+上机迭代。**3-bit 奇数位宽在 AIE2P 上的 unpack 成本是结构性的，
+  我建议 M3' 起步时用真实 decode 端到端数据复核"3-bit vs 4-bit"的取舍**
+  （4-bit 对齐车道，extract 几乎免费，体积 +31%）——但这超出我的授权范围，留给决策。
+
+**M2' 系列技术资产（全部入库）**：CI 编译管线（mlir_aie 1.3.4 + llvm-aie nightly）、
+本机 xclbinutil 组装（xrt_windows_sdk）、XBF3-BP 位平面格式（pack3_bp，round-trip 验证）、
+本地 Peano 编译环境（llvm-aie win wheel + aie_api 头文件）、v1→v7 完整演化记录与坑清单。
+
 ### v5（管线双通道/八列）+ 最终结论（2026-10-22，M2'-4 收尾）
 
 **真实计算最好成绩：v4 scalar（4 列，位平面+向量化）= 0.57 GB/s，verify PASS。**
