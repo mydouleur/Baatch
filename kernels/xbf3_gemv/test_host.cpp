@@ -38,6 +38,8 @@ int main(int argc, char** argv) {
   std::string dir = argv[3];
   int iters = argc > 4 ? atoi(argv[4]) : 20;
   bool verify = !(argc > 5 && std::string(argv[5]) == "--noverify");
+  int ncols = 1;
+  for (int i = 5; i + 1 < argc; i++) if (std::string(argv[i]) == "--cols") ncols = atoi(argv[i+1]);
 
   auto wts = read_file(dir + "\\wts.bin");
   auto act = read_file(dir + "\\act.bin");
@@ -89,9 +91,17 @@ int main(int argc, char** argv) {
     int bad = 0;
     float max_rel = 0;
     if (verify) {
-      const float* y = bo_out.map<const float*>();
+      const float* yb = bo_out.map<const float*>();
       const float* yr = reinterpret_cast<const float*>(ref.data());
       size_t n = ref.size() / 4;
+      // v3: out 到达为 column-major [col][E][rows_per_col]；重排回 row-major [E][OUT]
+      std::vector<float> yrm(n);
+      size_t rpc = 2048 / ncols, per_col = n_exp * rpc;
+      for (size_t i = 0; i < n; i++) {
+        size_t e = i / 2048, r = i % 2048, c = r / rpc;
+        yrm[i] = yb[c * per_col + e * rpc + (r % rpc)];
+      }
+      const float* y = yrm.data();
       for (size_t i = 0; i < n; i++) {
         float d = std::fabs(y[i] - yr[i]);
         float rel = d / (std::fabs(yr[i]) + 1e-6f);

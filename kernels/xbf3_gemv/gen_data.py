@@ -15,6 +15,7 @@ import xbf3
 
 OUT, IN, SB = 2048, 512, 256
 SB_BYTES = 98
+ROW_B = 196
 
 
 def f32_to_bf16_bytes(x):
@@ -30,6 +31,8 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--experts", type=int, default=1,
                     help="replicate weight matrix E times (v2 bandwidth runs)")
+    ap.add_argument("--cols", type=int, default=1,
+                    help="v3: split rows across N columns, wts laid out column-major")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
@@ -48,11 +51,16 @@ def main():
     row[:, :, 0] = (s_bf & 0xFF).astype(np.uint8)
     row[:, :, 1] = (s_bf >> 8).astype(np.uint8)
     row[:, :, 2:] = packed
-    wts = row.reshape(-1)
+    wts = row.reshape(-1)                    # OUT*196
     if a.experts > 1:
-        wts = np.tile(wts, a.experts)
+        wts = np.tile(wts, a.experts)        # E * OUT * 196
+    if a.cols > 1:
+        rpc = OUT // a.cols
+        wts = wts.reshape(a.experts, a.cols, rpc * ROW_B)  # [E][col][rows]
+        wts = np.transpose(wts, (1, 0, 2)).reshape(-1)     # [col][E][rows]
     wts.tofile(os.path.join(a.out, "wts.bin"))
-    x.tofile(os.path.join(a.out, "act.bin"))
+    xa = np.tile(x, a.cols) if a.cols > 1 else x
+    xa.tofile(os.path.join(a.out, "act.bin"))
 
     # reference: dequant with the SAME bf16-rounded scales the kernel consumes
     s_kernel = (s_bf.astype(np.uint32) << 16).view(np.float32)  # (OUT, 2)
@@ -61,7 +69,7 @@ def main():
     if a.experts > 1:
         y_ref = np.tile(y_ref, a.experts)
     y_ref.tofile(os.path.join(a.out, "out_ref.bin"))
-    print(f"wts={wts.nbytes}B act={x.nbytes}B out_ref={y_ref.nbytes}B -> {a.out}/")
+    print(f"wts={wts.nbytes}B act={xa.nbytes}B out_ref={y_ref.nbytes}B -> {a.out}/")
 
 
 if __name__ == "__main__":
