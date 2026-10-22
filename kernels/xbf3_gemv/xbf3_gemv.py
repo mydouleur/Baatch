@@ -2,18 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """XBF3 GEMV — single-column single-core streaming design (M2'-1, correctness-first).
 
-Matrix: (OUT x IN) = (2048 x 512), one expert down_proj shape.
-Weights: XBF3 packed, row-major, 2 superblocks/row (IN=512), 98B/superblock,
-196B/row, 401,408B total. Streamed DRAM -> shim -> core in 16-row chunks
-(3136B), double-buffered. Activations x[512] fp32 resident on tile.
-Output y[2048] fp32, produced in 16-row chunks.
+mlir-aie 1.3.4 IRON idiom. Matrix: (OUT x IN) = (2048 x 512), one expert
+down_proj shape. Weights XBF3 packed row-major (2 superblocks/row, 98B/sb,
+196B/row, 401,408B total), streamed DRAM->shim->core in 16-row chunks (3136B).
+Activations x[512] fp32 resident on tile. Output y[2048] fp32 in 16-row chunks.
 
-Host ABI (runtime sequence operand order): [wts, act, out] ->
-kernel arg slots 3, 4, 5 (slot0=opcode, 1=instr, 2=ninstr).
+Host ABI (rt.sequence operand order): [wts, act, out] -> arg slots 3, 4, 5
+(slot0=opcode, 1=instr, 2=ninstr).
 """
 
 import argparse
-import sys
 
 import numpy as np
 import aie.iron as iron
@@ -75,13 +73,14 @@ def xbf3_gemv(wts: In, act: In, out: Out):
 
     worker = Worker(core_body, fn_args=[of_wts.cons(), of_act.cons(), of_out.prod(), fn])
 
-    def sequence(wts, act, out, w_h, a_h, o_h):
-        a_h.fill(act)
-        w_h.fill(wts)
-        o_h.drain(out, wait=True)
+    rt = Runtime()
+    with rt.sequence(wts_ty, act_ty, out_ty) as (w_h, a_h, o_h):
+        rt.start(worker)
+        rt.fill(of_act.prod(), a_h)
+        rt.fill(of_wts.prod(), w_h)
+        rt.drain(of_out.cons(), o_h, wait=True)
 
-    rt = Runtime(sequence, fn_args=[wts_ty, act_ty, out_ty, of_wts.prod(), of_act.prod(), of_out.cons()])
-    return Program(iron.get_current_device(), rt, workers=[worker]).resolve_program()
+    return Program(iron.get_current_device(), rt).resolve_program()
 
 
 def _make_argparser():
@@ -96,7 +95,7 @@ def main():
         xbf3_gemv,
         opts,
         compile_kwargs={},
-        run_and_verify=None,  # 本机运行走 C++ host（test_host.cpp），Python 运行路径不用
+        run_and_verify=None,  # 本机运行走 C++ host（test_host.cpp）
         device=device_from_args,
     )
 
