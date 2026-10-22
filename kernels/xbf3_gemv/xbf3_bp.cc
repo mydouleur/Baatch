@@ -51,9 +51,10 @@ void xbf3_gemv_chunk4(const uint8_t* __restrict w, float* __restrict y) {
       float scale;
       __builtin_memcpy(&scale, &fbits, sizeof(float));
 
-      aie::vector<int16_t, 16> p0 = aie::load_v<16>((const int16_t*)(rowp + 2));
-      aie::vector<int16_t, 16> p1 = aie::load_v<16>((const int16_t*)(rowp + 34));
-      aie::vector<int16_t, 16> p2 = aie::load_v<16>((const int16_t*)(rowp + 66));
+      // 平面起点非 32B 对齐（scale 2B 前缀 + 196B 行距）→ 用非对齐迭代器
+      aie::vector<int16_t, 16> p0 = *aie::cbegin_unaligned_vector<16>((const int16_t*)(rowp + 2));
+      aie::vector<int16_t, 16> p1 = *aie::cbegin_unaligned_vector<16>((const int16_t*)(rowp + 34));
+      aie::vector<int16_t, 16> p2 = *aie::cbegin_unaligned_vector<16>((const int16_t*)(rowp + 66));
 
       aie::accum<accfloat, 32> vacc = aie::zeros<accfloat, 32>();
 #pragma unroll
@@ -95,9 +96,9 @@ void xbf3_debug4(const uint8_t* __restrict w, float* __restrict y) {
   const aie::vector<int16_t, 16> m07 = aie::broadcast<int16_t, 16>(0x0707);
   const aie::vector<int8_t, 32>  m4  = aie::broadcast<int8_t, 32>(4);
   const uint8_t* rowp = w;
-  aie::vector<int16_t, 16> p0 = aie::load_v<16>((const int16_t*)(rowp + 2));
-  aie::vector<int16_t, 16> p1 = aie::load_v<16>((const int16_t*)(rowp + 34));
-  aie::vector<int16_t, 16> p2 = aie::load_v<16>((const int16_t*)(rowp + 66));
+  aie::vector<int16_t, 16> p0 = *aie::cbegin_unaligned_vector<16>((const int16_t*)(rowp + 2));
+  aie::vector<int16_t, 16> p1 = *aie::cbegin_unaligned_vector<16>((const int16_t*)(rowp + 34));
+  aie::vector<int16_t, 16> p2 = *aie::cbegin_unaligned_vector<16>((const int16_t*)(rowp + 66));
   aie::store_v(y + 0,  aie::to_float<float>(p0));
   aie::store_v(y + 16, aie::to_float<float>(p1));
   aie::store_v(y + 32, aie::to_float<float>(p2));
