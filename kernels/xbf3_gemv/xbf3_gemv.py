@@ -80,7 +80,7 @@ def xbf3_gemv(wts: In, act: In, out: Out):
         w_h.fill(wts)
         o_h.drain(out, wait=True)
 
-    rt = Runtime(sequence, [wts_ty, act_ty, out_ty, of_wts.prod(), of_act.prod(), of_out.cons()])
+    rt = Runtime(sequence, fn_args=[wts_ty, act_ty, out_ty, of_wts.prod(), of_act.prod(), of_out.cons()])
     return Program(iron.get_current_device(), rt, workers=[worker]).resolve_program()
 
 

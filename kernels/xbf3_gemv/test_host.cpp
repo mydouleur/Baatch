@@ -45,7 +45,7 @@ int main(int argc, char** argv) {
 
   try {
     xrt::device dev{0};
-    xrt::xclbin xclbin{xclbin_path};
+    xrt::xclbin xclbin{std::string(xclbin_path)};
     auto uuid = dev.register_xclbin(xclbin);
     xrt::hw_context hwctx{dev, uuid};
     xrt::kernel kernel{hwctx, "MLIR_AIE"};
