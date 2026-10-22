@@ -52,23 +52,23 @@ void xbf3_gemv_chunk4(const uint8_t* __restrict w, float* __restrict y) {
       __builtin_memcpy(&scale, &fbits, sizeof(float));
 
       // 平面起点非 32B 对齐（scale 2B 前缀 + 196B 行距）→ 用非对齐迭代器
-      aie::vector<int16_t, 16> p0 = *aie::cbegin_unaligned_vector<16>((const int16_t*)(rowp + 2));
-      aie::vector<int16_t, 16> p1 = *aie::cbegin_unaligned_vector<16>((const int16_t*)(rowp + 34));
-      aie::vector<int16_t, 16> p2 = *aie::cbegin_unaligned_vector<16>((const int16_t*)(rowp + 66));
+      aie::vector<uint16_t, 16> p0 = *aie::cbegin_unaligned_vector<16>((const uint16_t*)(rowp + 2));
+      aie::vector<uint16_t, 16> p1 = *aie::cbegin_unaligned_vector<16>((const uint16_t*)(rowp + 34));
+      aie::vector<uint16_t, 16> p2 = *aie::cbegin_unaligned_vector<16>((const uint16_t*)(rowp + 66));
 
       aie::accum<accfloat, 32> vacc = aie::zeros<accfloat, 32>();
 #pragma unroll
       for (int k = 0; k < 8; k++) {
         // 先按位隔离 bit k（0x0101<<k 掩码），再按平面加权 mul/mac 上移到
         // 字节内 bits[0..2]（权重 1/2/4 折进乘子），srs>>8 落位，band 清场。
-        const aie::vector<int16_t, 16> mk =
-            aie::broadcast<int16_t, 16>(g_bitmask_tab[k]);
-        aie::vector<int16_t, 16> t0 = aie::bit_and(p0, mk);
-        aie::vector<int16_t, 16> t1 = aie::bit_and(p1, mk);
-        aie::vector<int16_t, 16> t2 = aie::bit_and(p2, mk);
-        aie::accum<acc32, 16> acc = aie::mul(t0, aie::broadcast<int16_t, 16>(g_shift_tab[k]));
-        acc = aie::mac(acc, t1, aie::broadcast<int16_t, 16>(g_shift_tab1[k]));
-        acc = aie::mac(acc, t2, aie::broadcast<int16_t, 16>(g_shift_tab2[k]));
+        const aie::vector<uint16_t, 16> mk =
+            aie::broadcast<uint16_t, 16>((uint16_t)g_bitmask_tab[k]);
+        aie::vector<uint16_t, 16> t0 = aie::bit_and(p0, mk);
+        aie::vector<uint16_t, 16> t1 = aie::bit_and(p1, mk);
+        aie::vector<uint16_t, 16> t2 = aie::bit_and(p2, mk);
+        aie::accum<acc32, 16> acc = aie::mul(t0, aie::broadcast<uint16_t, 16>((uint16_t)g_shift_tab[k]));
+        acc = aie::mac(acc, t1, aie::broadcast<uint16_t, 16>((uint16_t)g_shift_tab1[k]));
+        acc = aie::mac(acc, t2, aie::broadcast<uint16_t, 16>((uint16_t)g_shift_tab2[k]));
         aie::vector<uint16_t, 16> e = aie::bit_and(acc.to_vector_sign<uint16_t>(false, 8), m07);
         // int16 车道 → int8 视图只能走 DM 往返（cast_to 窄化会生成非法 shl）
         aie::store_v(g_scratch16, e);
@@ -96,18 +96,18 @@ void xbf3_debug4(const uint8_t* __restrict w, float* __restrict y) {
   const aie::vector<uint16_t, 16> m07 = aie::broadcast<uint16_t, 16>(0x0707);
   const aie::vector<int8_t, 32>  m4  = aie::broadcast<int8_t, 32>(4);
   const uint8_t* rowp = w;
-  aie::vector<int16_t, 16> p0 = *aie::cbegin_unaligned_vector<16>((const int16_t*)(rowp + 2));
-  aie::vector<int16_t, 16> p1 = *aie::cbegin_unaligned_vector<16>((const int16_t*)(rowp + 34));
-  aie::vector<int16_t, 16> p2 = *aie::cbegin_unaligned_vector<16>((const int16_t*)(rowp + 66));
+  aie::vector<uint16_t, 16> p0 = *aie::cbegin_unaligned_vector<16>((const uint16_t*)(rowp + 2));
+  aie::vector<uint16_t, 16> p1 = *aie::cbegin_unaligned_vector<16>((const uint16_t*)(rowp + 34));
+  aie::vector<uint16_t, 16> p2 = *aie::cbegin_unaligned_vector<16>((const uint16_t*)(rowp + 66));
 #pragma unroll
   for (int k = 0; k < 8; k++) {
-    const aie::vector<int16_t, 16> mk = aie::broadcast<int16_t, 16>(g_bitmask_tab[k]);
-    aie::vector<int16_t, 16> t0 = aie::bit_and(p0, mk);
-    aie::vector<int16_t, 16> t1 = aie::bit_and(p1, mk);
-    aie::vector<int16_t, 16> t2 = aie::bit_and(p2, mk);
-    aie::accum<acc32, 16> acc = aie::mul(t0, aie::broadcast<int16_t, 16>(g_shift_tab[k]));
-    acc = aie::mac(acc, t1, aie::broadcast<int16_t, 16>(g_shift_tab1[k]));
-    acc = aie::mac(acc, t2, aie::broadcast<int16_t, 16>(g_shift_tab2[k]));
+    const aie::vector<uint16_t, 16> mk = aie::broadcast<uint16_t, 16>((uint16_t)g_bitmask_tab[k]);
+    aie::vector<uint16_t, 16> t0 = aie::bit_and(p0, mk);
+    aie::vector<uint16_t, 16> t1 = aie::bit_and(p1, mk);
+    aie::vector<uint16_t, 16> t2 = aie::bit_and(p2, mk);
+    aie::accum<acc32, 16> acc = aie::mul(t0, aie::broadcast<uint16_t, 16>((uint16_t)g_shift_tab[k]));
+    acc = aie::mac(acc, t1, aie::broadcast<uint16_t, 16>((uint16_t)g_shift_tab1[k]));
+    acc = aie::mac(acc, t2, aie::broadcast<uint16_t, 16>((uint16_t)g_shift_tab2[k]));
     aie::vector<uint16_t, 16> e = aie::bit_and(acc.to_vector_sign<uint16_t>(false, 8), m07);
     aie::store_v(g_scratch16, e);
     aie::vector<int8_t, 32> e8 = aie::load_v<32>((const int8_t*)g_scratch16);
