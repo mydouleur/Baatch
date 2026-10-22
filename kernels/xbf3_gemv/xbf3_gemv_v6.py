@@ -66,7 +66,7 @@ def xbf3_gemv_v3(wts: In, act: In, out: Out, *,
     wts_col_ty = np.ndarray[(E * rows_per_col * ROW_BYTES,), np.dtype[np.uint8]]
     out_col_ty = np.ndarray[(E * rows_per_col,), np.dtype[np.float32]]
 
-    c_name = {"scalar": "xbf3_gemv_chunk4", "discard": "xbf3_discard_chunk4", "debug": "xbf3_debug4"}[core_mode]
+    c_name = {"scalar": "xbf3_gemv_chunk6", "discard": "xbf3_discard_chunk6", "debug": "xbf3_debug4"}[core_mode]
     fn = ExternalFunction(
         c_name,
         source_file="xbf3_bps.cc",
