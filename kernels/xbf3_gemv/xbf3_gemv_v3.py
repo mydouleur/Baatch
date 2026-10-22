@@ -52,7 +52,7 @@ def xbf3_gemv_v3(wts: In, act: In, out: Out, *,
     assert l2_rows % chunk_rows == 0 and OUT % NC == 0 and rows_per_col % chunk_rows == 0
     chunks_per_col = (rows_per_col // chunk_rows) * E
 
-    slab_bytes = CHUNK_WTS + E * rows_per_col * ROW_BYTES   # act 块 + 权重
+    slab_bytes = L2_WTS + E * rows_per_col * ROW_BYTES   # act 占一个完整 L2 块（对齐）+ 权重
     wts_ty = np.ndarray[(NC * slab_bytes,), np.dtype[np.uint8]]
     act_ty = np.ndarray[(4,), np.dtype[np.float32]]  # 占位，不用
     out_ty = np.ndarray[(NC * E * rows_per_col,), np.dtype[np.float32]]
@@ -76,8 +76,11 @@ def xbf3_gemv_v3(wts: In, act: In, out: Out, *,
     def make_body():
         def core_body(of_wts, of_out, ld, fn):
             w0 = of_wts.acquire(1)
-            ld(w0, w0)          # 首块 = 激活（拷进静态 xbuf）
+            ld(w0, w0)          # 首 L1 块 = 激活（拷进静态 xbuf）
             of_wts.release(1)
+            for _ in range_(l2_rows // chunk_rows - 1):  # act L2 块的其余 L1 块是填充
+                wp = of_wts.acquire(1)
+                of_wts.release(1)
             for _ in range_(chunks_per_col):
                 w = of_wts.acquire(1)
                 y = of_out.acquire(1)
