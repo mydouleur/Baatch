@@ -98,7 +98,7 @@ jobs:
             mkdir -p build_$SZ work_$SZ
             cp work/vm_64x128.o work_$SZ/
             python3 vector_matrix.py --dev npu2 -N $SZ -K $SZ > work_$SZ/aie.mlir
-            "$AIECC" --no-compile-host --no-xchesscc --no-xbridge --peano="$PEANO_INSTALL_DIR"               work_$SZ/aie.mlir --aie-generate-npu-insts --npu-insts-name=build_$SZ/insts.bin               --aie-generate-pdi --pdi-name=build_$SZ/design.pdi               --aie-generate-xclbin --xclbin-name=build_$SZ/unused.xclbin               --tmpdir=work_$SZ --verbose 2>&1 | tail -40 || true
+            python3 "$AIECC" --no-compile-host --no-xchesscc --no-xbridge --peano="$PEANO_INSTALL_DIR"               work_$SZ/aie.mlir --aie-generate-npu-insts --npu-insts-name=build_$SZ/insts.bin               --aie-generate-pdi --pdi-name=build_$SZ/design.pdi               --aie-generate-xclbin --xclbin-name=build_$SZ/unused.xclbin               --tmpdir=work_$SZ --verbose 2>&1 | tail -40 || true
             ls -la build_$SZ/
           done
 
