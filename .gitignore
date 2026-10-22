@@ -37,3 +37,4 @@ kernels/**/data*/
 kernels/**/stub*/
 kernels/**/tmp/
 kernels/**/*.obj
+models/*.baa
