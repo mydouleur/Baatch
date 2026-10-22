@@ -44,6 +44,8 @@ jobs:
             "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 $BP_FLAGS               -c xbf3_bp.cc -DCHUNK_ROWS_C=$cr -o $w/xbf3_discard_chunk4.o
             "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 $BP_FLAGS               -c xbf3_bp_load.cc -o $w/xbf3_load_act4.o
             "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 $BP_FLAGS               -c xbf3_bp.cc -DCHUNK_ROWS_C=$cr -o $w/xbf3_debug4.o
+            "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 $BP_FLAGS               -c xbf3_bp.cc -DCHUNK_ROWS_C=$cr -o $w/xbf3_extract_only4.o
+            "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 $BP_FLAGS               -c xbf3_bp.cc -DCHUNK_ROWS_C=$cr -o $w/xbf3_mac_only4.o
             "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 $BP_FLAGS               -c xbf3_bps.cc -DCHUNK_ROWS_C=$cr -o $w/xbf3_gemv_chunk6.o
             "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 $BP_FLAGS               -c xbf3_bps.cc -DCHUNK_ROWS_C=$cr -o $w/xbf3_discard_chunk6.o
             "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 $BP_FLAGS               -c xbf3_bps_load.cc -o $w/xbf3_load_act6.o
@@ -60,6 +62,8 @@ jobs:
           build_one xbf3_gemv_v6.py v6_scalar --core scalar --experts 64 --ncols 4
           build_one xbf3_gemv_v6.py v6_discard --core discard --experts 64 --ncols 4
           build_one xbf3_gemv_v4.py v4_discard --core discard --experts 64 --ncols 4
+          build_one xbf3_gemv_v4.py v4_extract_only --core extract_only --experts 64 --ncols 4
+          build_one xbf3_gemv_v4.py v4_mac_only --core mac_only --experts 64 --ncols 4
           CR=64 build_one xbf3_gemv_v5.py v5_discard --core discard --experts 64 --ncols 4 --chunk-rows 64 --l2-rows 256
           build_one xbf3_gemv_v5.py v5_discard8 --core discard --experts 64 --ncols 8 --chunk-rows 64 --l2-rows 256
           build_one xbf3_gemv_v4.py v4_discard8 --core discard --experts 64 --ncols 8

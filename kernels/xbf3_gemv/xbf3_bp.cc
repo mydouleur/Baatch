@@ -124,3 +124,62 @@ void xbf3_debug4(const uint8_t* __restrict w, float* __restrict y) {
     for (int j = 0; j < 16; j++) y[k * 16 + j] = qf[j];
   }
 }
+
+// 剖析变体：只提取（无 cvt/mac/reduce）
+extern "C"
+void xbf3_extract_only4(const uint8_t* __restrict w, float* __restrict y) {
+  const aie::vector<uint16_t, 16> m07 = aie::broadcast<uint16_t, 16>(0x0707);
+  const aie::vector<int8_t, 32>  m4  = aie::broadcast<int8_t, 32>(4);
+  aie::vector<uint16_t, 16> mk_v[8], sh0_v[8], sh1_v[8], sh2_v[8];
+  for (int k = 0; k < 8; k++) {
+    mk_v[k]  = aie::broadcast<uint16_t, 16>((uint16_t)g_bitmask_tab[k]);
+    sh0_v[k] = aie::broadcast<uint16_t, 16>((uint16_t)g_shift_tab[k]);
+    sh1_v[k] = aie::broadcast<uint16_t, 16>((uint16_t)g_shift_tab1[k]);
+    sh2_v[k] = aie::broadcast<uint16_t, 16>((uint16_t)g_shift_tab2[k]);
+  }
+  int sink = 0;
+  for (int r = 0; r < CHUNK_ROWS; r++) {
+    const uint8_t* rowp = w + r * (2 * 98);
+    for (int sb = 0; sb < 2; sb++, rowp += 98) {
+      aie::vector<uint16_t, 16> p0 = *aie::cbegin_unaligned_vector<16>((const uint16_t*)(rowp + 2));
+      aie::vector<uint16_t, 16> p1 = *aie::cbegin_unaligned_vector<16>((const uint16_t*)(rowp + 34));
+      aie::vector<uint16_t, 16> p2 = *aie::cbegin_unaligned_vector<16>((const uint16_t*)(rowp + 66));
+#pragma unroll
+      for (int k = 0; k < 8; k++) {
+        aie::vector<uint16_t, 16> t0 = aie::bit_and(p0, mk_v[k]);
+        aie::vector<uint16_t, 16> t1 = aie::bit_and(p1, mk_v[k]);
+        aie::vector<uint16_t, 16> t2 = aie::bit_and(p2, mk_v[k]);
+        aie::accum<acc32, 16> acc = aie::mul(t0, sh0_v[k]);
+        acc = aie::mac(acc, t1, sh1_v[k]);
+        acc = aie::mac(acc, t2, sh2_v[k]);
+        aie::vector<uint16_t, 16> e = aie::bit_and(acc.to_vector_sign<uint16_t>(false, 8), m07);
+        aie::store_v(g_scratch16, e);
+        aie::vector<int8_t, 32> e8 = aie::load_v<32>((const int8_t*)g_scratch16);
+        e8 = aie::bit_xor(e8, m4) - m4;
+        sink += e8[0];
+      }
+    }
+  }
+  y[0] = (float)sink;
+}
+
+// 剖析变体：只 MAC（固定 qb=1，无提取）
+extern "C"
+void xbf3_mac_only4(const uint8_t* __restrict w, float* __restrict y) {
+  const aie::vector<float, 32> one = aie::broadcast<float, 32>(1.0f);
+  for (int r = 0; r < CHUNK_ROWS; r++) {
+    aie::accum<accfloat, 32> vacc = aie::zeros<accfloat, 32>();
+    const uint8_t* rowp = w + r * (2 * 98);
+    for (int sb = 0; sb < 2; sb++, rowp += 98) {
+      uint32_t sbits = (uint32_t)rowp[0] | ((uint32_t)rowp[1] << 8);
+      uint32_t fbits = sbits << 16;
+      float scale;
+      __builtin_memcpy(&scale, &fbits, sizeof(float));
+#pragma unroll
+      for (int k = 0; k < 8; k++)
+        vacc = aie::mac(vacc, one, xp_v[k * 2 + sb]);
+      float sacc = aie::reduce_add(vacc.to_vector<float>());
+      y[r] = scale * sacc;   // 含标量软浮点（与 v4 同结构）
+    }
+  }
+}
