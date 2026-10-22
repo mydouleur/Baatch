@@ -1,4 +1,4 @@
-// test_host.cpp — Windows XRT host for xbf3_gemv (M2'-1).
+// test_host.cpp — Windows XRT host for xbf3_gemv (v1/v2).
 // Loads CI-built xclbin + insts.bin, feeds wts.bin/act.bin, verifies against out_ref.bin.
 // Host ABI (MLIR_AIE): arg0=opcode 3, arg1=instr bo, arg2=instr words,
 // arg3=wts, arg4=act, arg5=out  (runtime sequence operand order [wts, act, out]).
@@ -14,6 +14,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <algorithm>
 #include <fstream>
 
 static std::vector<char> read_file(const std::string& p) {
@@ -29,19 +30,24 @@ static std::vector<char> read_file(const std::string& p) {
 
 int main(int argc, char** argv) {
   if (argc < 4) {
-    std::printf("usage: %s <xclbin> <insts.bin> <datadir> [iters]\n", argv[0]);
+    std::printf("usage: %s <xclbin> <insts.bin> <datadir> [iters] [--noverify]\n", argv[0]);
     return 1;
   }
   const char* xclbin_path = argv[1];
   const char* insts_path = argv[2];
   std::string dir = argv[3];
   int iters = argc > 4 ? atoi(argv[4]) : 20;
+  bool verify = !(argc > 5 && std::string(argv[5]) == "--noverify");
 
-  auto wts = read_file(dir + "\\wts.bin");      // 401408 B
-  auto act = read_file(dir + "\\act.bin");      // 2048 B
-  auto ref = read_file(dir + "\\out_ref.bin");  // 8192 B
+  auto wts = read_file(dir + "\\wts.bin");
+  auto act = read_file(dir + "\\act.bin");
+  auto ref = verify ? read_file(dir + "\\out_ref.bin") : std::vector<char>();
   auto instr = read_file(insts_path);
   size_t instr_words = instr.size() / 4;
+  size_t out_bytes = verify ? ref.size() : 2048 * 4;
+  // v2: out size = E * 2048 * 4; derive E from wts size (401408B/expert)
+  size_t n_exp = wts.size() / 401408;
+  if (!verify) out_bytes = n_exp * 2048 * 4;
 
   try {
     xrt::device dev{0};
@@ -49,21 +55,22 @@ int main(int argc, char** argv) {
     auto uuid = dev.register_xclbin(xclbin);
     xrt::hw_context hwctx{dev, uuid};
     xrt::kernel kernel{hwctx, "MLIR_AIE"};
-    std::printf("kernel MLIR_AIE ready\n");
+    std::printf("kernel MLIR_AIE ready; experts=%zu wts=%.1fMB out=%zuKB\n",
+                n_exp, wts.size() / 1048576.0, out_bytes / 1024);
 
     xrt::bo bo_instr(dev, instr.size(), XCL_BO_FLAGS_CACHEABLE, kernel.group_id(1));
     xrt::bo bo_wts(dev, wts.size(), XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(3));
     xrt::bo bo_act(dev, act.size(), XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(4));
-    xrt::bo bo_out(dev, ref.size(), XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(5));
+    xrt::bo bo_out(dev, out_bytes, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(5));
 
     memcpy(bo_instr.map(), instr.data(), instr.size());
     memcpy(bo_wts.map(), wts.data(), wts.size());
     memcpy(bo_act.map(), act.data(), act.size());
-    memset(bo_out.map(), 0, ref.size());
-    // host-only/coherent BOs on NPU: no sync needed (M0 finding); instr is cacheable:
+    memset(bo_out.map(), 0, out_bytes);
     bo_instr.sync(XCL_BO_SYNC_BO_TO_DEVICE);
 
     std::vector<double> times;
+    times.reserve(iters);
     for (int i = 0; i < iters; i++) {
       xrt::run run{kernel};
       run.set_arg(0, 3);
@@ -77,33 +84,35 @@ int main(int argc, char** argv) {
       run.wait2();
       auto t1 = std::chrono::steady_clock::now();
       times.push_back(std::chrono::duration<double>(t1 - t0).count());
-      if (i == 0) std::printf("iter0 %.3f ms\n", times[0] * 1e3);
     }
 
-    // dump for offline analysis
-    { auto* yp = bo_out.map<float*>();
-      std::ofstream of("out_npu.bin", std::ios::binary);
-      of.write((char*)yp, 2048*4); }
-    // verify
-    const float* y = bo_out.map<const float*>();
-    const float* yr = reinterpret_cast<const float*>(ref.data());
     int bad = 0;
     float max_rel = 0;
-    for (int i = 0; i < 2048; i++) {
-      float d = std::fabs(y[i] - yr[i]);
-      float rel = d / (std::fabs(yr[i]) + 1e-6f);
-      if (rel > max_rel) max_rel = rel;
-      if (rel > 1e-3f && d > 1e-3f) {
-        if (bad < 5) std::printf("  y[%d] = %f  ref %f\n", i, y[i], yr[i]);
-        bad++;
+    if (verify) {
+      const float* y = bo_out.map<const float*>();
+      const float* yr = reinterpret_cast<const float*>(ref.data());
+      size_t n = ref.size() / 4;
+      for (size_t i = 0; i < n; i++) {
+        float d = std::fabs(y[i] - yr[i]);
+        float rel = d / (std::fabs(yr[i]) + 1e-6f);
+        if (rel > max_rel) max_rel = rel;
+        if (rel > 1e-3f && d > 1e-3f) {
+          if (bad < 5) std::printf("  y[%zu] = %f  ref %f\n", i, y[i], yr[i]);
+          bad++;
+        }
       }
+      std::printf("verify: %s (bad=%d max_rel=%.2e)\n", bad ? "FAIL" : "PASS", bad, max_rel);
     }
-    std::printf("verify: %s (bad=%d max_rel=%.2e)\n", bad ? "FAIL" : "PASS", bad, max_rel);
 
-    double avg = 0; for (double t : times) avg += t; avg /= times.size();
-    double bw = (double)wts.size() / avg / 1e9;
-    std::printf("RESULT iters=%d avg=%.3f ms  weight-stream %.2f GB/s\n",
-                iters, avg * 1e3, bw);
+    std::vector<double> warm(times.begin() + (times.size() > 5 ? 5 : 0), times.end());
+    double mn = *std::min_element(warm.begin(), warm.end());
+    double mx = *std::max_element(warm.begin(), warm.end());
+    double avg = 0; for (double t : warm) avg += t; avg /= warm.size();
+    double gb = (double)wts.size() / 1e9;
+    std::printf("RESULT iters=%d experts=%zu  per-run ms: min=%.3f avg=%.3f max=%.3f\n",
+                iters, n_exp, mn * 1e3, avg * 1e3, mx * 1e3);
+    std::printf("RESULT weight-stream GB/s: min=%.2f avg=%.2f max=%.2f (warm)\n",
+                gb / mx, gb / avg, gb / mn);
     return bad ? 1 : 0;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "ERROR: %s\n", e.what());

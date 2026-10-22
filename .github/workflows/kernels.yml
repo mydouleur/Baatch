@@ -24,28 +24,29 @@ jobs:
           # mlir_aie wheel 不含 Peano；llvm-aie wheel 装在 platlib/llvm-aie
           LOC=$(pip show llvm-aie | awk '/^Location:/{print $2}')
           echo "PEANO_INSTALL_DIR=$LOC/llvm-aie" >> $GITHUB_ENV
-          ls "$LOC/llvm-aie/bin" | head
 
-      - name: Build xbf3_gemv (emit MLIR + peano + aiecc, no xclbinutil)
+      - name: Build kernels (emit-mlir + peano + aiecc; xclbin 组装在本机)
         run: |
           set -x
           cd kernels/xbf3_gemv
-          mkdir -p build work
-          # 1) design MLIR
-          python3 xbf3_gemv.py --emit-mlir > work/aie.mlir
-          # 2) core kernel .o (Peano, aie2p)
-          "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 \
-            -c xbf3_gemv.cc -o work/xbf3_gemv_chunk.o
-          # 3) aiecc: insts + PDI + metadata jsons（xclbin 组装留给本机 xclbinutil）
           AIECC=$(python3 -c "from aie.tools import MLIR_AIE_BIN_DIR as b; print(b)")/aiecc
-          "$AIECC" --no-compile-host --no-xchesscc --no-xbridge --peano="$PEANO_INSTALL_DIR" \
-            work/aie.mlir \
-            --aie-generate-npu-insts --npu-insts-name=build/insts.bin \
-            --aie-generate-pdi --pdi-name=build/design.pdi \
-            --aie-generate-xclbin --xclbin-name=build/xbf3_gemv.xclbin \
-            --tmpdir=work --verbose 2>&1 | tail -30 || true
-          echo "=== work/ ==="; ls -la work/
-          echo "=== build/ ==="; ls -la build/
+          build_one() {  # $1=design.py $2=tag; rest=extra design args
+            local py=$1 tag=$2; shift 2
+            mkdir -p build_$tag work_$tag
+            python3 $py --emit-mlir "$@" > work_$tag/aie.mlir
+            "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 \
+              -c xbf3_gemv.cc -o work_$tag/xbf3_gemv_chunk.o
+            cp work_$tag/xbf3_gemv_chunk.o work_$tag/xbf3_discard_chunk.o
+            "$AIECC" --no-compile-host --no-xchesscc --no-xbridge --peano="$PEANO_INSTALL_DIR" \
+              work_$tag/aie.mlir \
+              --aie-generate-npu-insts --npu-insts-name=build_$tag/insts.bin \
+              --aie-generate-pdi --pdi-name=build_$tag/design.pdi \
+              --tmpdir=work_$tag --verbose 2>&1 | tail -10 || true
+            ls -la build_$tag/
+          }
+          build_one xbf3_gemv_v2.py v2_scalar --core scalar --experts 64
+          build_one xbf3_gemv_v2.py v2_discard --core discard --experts 64
+          echo "=== done ==="
 
       - name: Upload artifacts
         if: always()
@@ -53,6 +54,6 @@ jobs:
         with:
           name: kernels-xclbin
           path: |
-            kernels/xbf3_gemv/build/**
-            kernels/xbf3_gemv/work/**
+            kernels/xbf3_gemv/build*/**
+            kernels/xbf3_gemv/work*/**
           if-no-files-found: ignore

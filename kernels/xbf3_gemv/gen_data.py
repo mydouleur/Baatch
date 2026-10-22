@@ -28,6 +28,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="data")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--experts", type=int, default=1,
+                    help="replicate weight matrix E times (v2 bandwidth runs)")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
@@ -47,6 +49,8 @@ def main():
     row[:, :, 1] = (s_bf >> 8).astype(np.uint8)
     row[:, :, 2:] = packed
     wts = row.reshape(-1)
+    if a.experts > 1:
+        wts = np.tile(wts, a.experts)
     wts.tofile(os.path.join(a.out, "wts.bin"))
     x.tofile(os.path.join(a.out, "act.bin"))
 
@@ -54,6 +58,8 @@ def main():
     s_kernel = (s_bf.astype(np.uint32) << 16).view(np.float32)  # (OUT, 2)
     w_dq = (q.astype(np.float32) * s_kernel[:, :, None]).reshape(OUT, IN)
     y_ref = (w_dq.astype(np.float64) @ x.astype(np.float64)).astype(np.float32)
+    if a.experts > 1:
+        y_ref = np.tile(y_ref, a.experts)
     y_ref.tofile(os.path.join(a.out, "out_ref.bin"))
     print(f"wts={wts.nbytes}B act={x.nbytes}B out_ref={y_ref.nbytes}B -> {a.out}/")
 

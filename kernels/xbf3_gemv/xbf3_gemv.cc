@@ -48,3 +48,10 @@ void xbf3_gemv_chunk(const uint8_t* __restrict w, const float* __restrict x,
     y[r] = acc;
   }
 }
+
+// Pipe-only variant: consume wts without computing (isolates DMA ceiling).
+extern "C"
+void xbf3_discard_chunk(const uint8_t* __restrict w, const float* __restrict x,
+                        float* __restrict y) {
+  y[0] = (float)w[0];  // 触摸首字节，防止被优化掉
+}
