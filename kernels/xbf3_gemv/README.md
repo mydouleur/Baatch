@@ -70,6 +70,30 @@ arg3=wts / arg4=act / arg5=out（按 runtime sequence 操作数顺序 [wts, act,
   （规避每 shim 2 MM2S + 1 S2MM 的通道预算——分离 act fifo 时 AIEPlaceTiles 失败）。
 - 已知限制：act 块独占一个 L2 对象（slab 对齐要求），核内跳过填充块。
 
+### v5（管线双通道/八列）+ 最终结论（2026-10-22，M2'-4 收尾）
+
+**真实计算最好成绩：v4 scalar（4 列，位平面+向量化）= 0.57 GB/s，verify PASS。**
+（v5 scalar 双通道版 verify 未过——分流/填块顺序待查，记录未解决；v4 是经验证的最好版本）
+
+**纯管线最好成绩：v5 discard 8 列双 fifo = 37.6 GB/s**（26.1MB/0.694ms）；
+4 列双 fifo 36.4 GB/s；4 列单 fifo 32.2 GB/s。
+
+管线归因（M2'-4 实测新知）：
+- IRON 的 rt.fill 每个 shim 只用 **1 个 MM2S 通道**（读了 input_with_addresses.mlir 实证：
+  双 fifo 同列仍落 channel 0）——所以 4→8 列几乎不涨（36→37.6），
+  单通道 × 列数才是旋钮；**每列 8-9.5 GB/s × 列数** 是 IRON 路径的当前上限。
+  要到 55+ 需要让每列真用上 2 通道（mladfx 风格的显式 dma 通道分配，IRON 1.3.4 未暴露），
+  或更长 BD（M0: 32MB 级 BD 才是满血；我们 50-200KB）。
+- 计算墙仍是主战场：v4 向量化 kernel ~2500 cyc/行（extract:MAC≈10:1，
+  3-bit 字段与 16/32 位车道不对齐 + AIE2P 无逐车道移位 + 无 LUT 硬件），
+  0.57 GB/s 真实计算 vs 37.6 GB/s 管线 —— 差 66 倍。
+- 我判断的下一个最优方向（按用户要求不动 3-bit 档位）：
+  **把 3 位平面拆成 3 个二进制 GEMV 的思路不变，但提取改走"按位掩码选择"**
+  （band + vsel/比较掩码直接选 x 累加，q = b0 + 2b1 − 4b2 自带符号），
+  完全绕开数值 unpack 与 int→float 转换；配合每列 4 个计算 tile 分摊
+  （单列 4 核可把每核行数降到 1/4）。若仍撞墙，记录建议评估 1-bit 主流 + 2-bit 残差
+  的同密度变体（需用户拍板，不自行改档）。
+
 ### v4（XBF3-BP 位平面 + 向量化）结论（2026-10-22，M2'-3 收尾）
 
 - **v4 scalar（真实计算）verify PASS**（64 专家 × 4 列全随机，max_rel=1.02e-04）：
