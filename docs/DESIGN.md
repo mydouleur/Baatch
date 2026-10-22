@@ -7,6 +7,7 @@ Tiel Coder 35B-A3B（Qwen3.6 系 MoE）在 AMD XDNA2 NPU 上的低功耗推理�
 - **目标机型**：AMD Ryzen AI 9 H 365（Strix Point），XDNA2 NPU（50 TOPS，硬件 BFP16/MX 支持），32 GB **LPDDR5x-8000 实测跑满**（Micron 4×8GB，聚合理论 128 GB/s），**NPU 路径上限 ~65 GB/s**（NPU 侧 NoC 配额限制，非内存限制，见 §5）；>65 GB/s 只能靠 NPU+CPU/iGPU 异构聚合（plan B，与低功耗目标冲突）
 - **核心动机：低功耗**。纯 NPU 路线，decode 时 CPU 大部分空闲，整机目标 15–25W（CPU 推理约 45–55W）
 - **首发模型**：Tiel-Coder-35B-A3B（权重源：ornith-ai/Ornith-1.5-35B-A3B BF16，MIT；两者权重逐比特一致，Tiel 仅换 Sharp 模板）
+- **首发范围（2026-10-22 用户定）**：**不做视觉塔**（mmproj 路径留接口不实现）；**发布不着急**（质量优先于时间表）；**首发只支持 Strix Point**（XDNA2 4 列 32 tile；Strix Halo/Krackan 后续再验）
 - **真实架构（2026-10-21 从 config.json 实证，比此前假设更复杂）**：`qwen3_5_moe` = **Qwen3-Next 式混合架构**：
   - 40 层，**3:1 线性注意力（Gated DeltaNet 式：conv4 + 16K/32V heads × 128d，SSM 态 fp32）: 全注意力**（full_attention_interval=4）→ **KV cache 只存在于 10 个全注意力层**（这就是 262k 上下文 KV <5 GB 的原因）
   - MoE：**256 专家 / top-8 / moe_intermediate 512**；hidden 2048；head_dim 256，16 attn heads；attn_output_gate=true
