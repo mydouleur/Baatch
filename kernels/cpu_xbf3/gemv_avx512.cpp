@@ -251,7 +251,57 @@ void gemv_rows_vnni(const uint8_t* w, int row0, int nrows, int n_in,
       }
       int isum = _mm512_reduce_add_epi32(_mm512_add_epi32(
           _mm512_add_epi32(acc0, acc1), _mm512_add_epi32(acc2, acc3)));
-      if (r == 0) printf("    dbg sb%d isum=%d scale=%f\n", sb, isum, scale);
+      yr += (float)(isum - 4 * (int)sumxq_sb[sb]) * sx * scale;
+    }
+    y[row0 + r] = yr;
+  }
+}
+
+// ---------------- 变体 D：vnni2（vpermb + vpmultishift + vpdpbusd） ----------------
+// vpermb 把 8 组 3B 聚进 8 个 qword 车道 → multishift 按位提取 8 字段/组
+// → and 7 → 字节 = field（值序自然连续！）→ vpdpbusd ×4 独立累加器。
+static const __m512i VN2_IDX = [] {
+  alignas(64) uint8_t idx[64];
+  for (int j = 0; j < 8; j++)          // qword 车道 j = 组 j
+    for (int t = 0; t < 8; t++)
+      idx[8*j + t] = (t < 3) ? (uint8_t)(3*j + t) : 0;
+  return _mm512_load_si512(idx);
+}();
+static const __m512i VN2_CTRL = [] {
+  alignas(64) uint8_t c[64];
+  for (int j = 0; j < 8; j++)
+    for (int t = 0; t < 8; t++) c[8*j + t] = 3 * t;   // 位偏移 0,3,...,21
+  return _mm512_load_si512(c);
+}();
+static const __m512i VN2_SEVEN = [] { return _mm512_set1_epi8(7); }();
+
+void gemv_rows_vnni2(const uint8_t* w, int row0, int nrows, int n_in,
+                     const int8_t* xq, const float* sumxq_sb, float sx,
+                     float* y) {
+  const int sb_per_row = n_in / SB;
+  const size_t row_bytes = (size_t)sb_per_row * ROW_BYTES;
+  for (int r = 0; r < nrows; r++) {
+    const uint8_t* rowp = w + (size_t)(row0 + r) * row_bytes;
+    float yr = 0.f;
+    for (int sb = 0; sb < sb_per_row; sb++) {
+      const uint8_t* wsb = rowp + sb * ROW_BYTES;
+      float scale = bf16_to_f32(wsb[0] | (wsb[1] << 8));
+      __m512i acc0 = _mm512_setzero_si512(), acc1 = _mm512_setzero_si512();
+      __m512i acc2 = _mm512_setzero_si512(), acc3 = _mm512_setzero_si512();
+      // 每 sb 96B：4 个 24B 窗口（每窗 8 组）——4 条独立 load→vpermb→multishift→dpbusd
+      // 链提供 ILP；合并 load（2×48B + 双 vpermb）实测反而降 16%（链数减半）。
+      for (int wnd = 0; wnd < 4; wnd++) {
+        __m512i z = _mm512_maskz_loadu_epi8(0x0000FFFFFFFFFFFFULL, wsb + 2 + 24 * wnd);
+        __m512i g = _mm512_permutexvar_epi8(VN2_IDX, z);
+        __m512i f = _mm512_and_si512(_mm512_multishift_epi64_epi8(VN2_CTRL, g), VN2_SEVEN);
+        // xq 自然序：dword lane l 的 4 字节 = 值 [sb*256 + 64*wnd + 4l .. +3]
+        // （qword j 的 8 字段 = 组 j 的 8 值 → dword 2j/2j+1 恰好连续覆盖组 j）
+        __m512i xv = _mm512_loadu_si512(xq + sb * 256 + 64 * wnd);
+        __m512i& a = (wnd == 0) ? acc0 : (wnd == 1) ? acc1 : (wnd == 2) ? acc2 : acc3;
+        a = _mm512_dpbusd_epi32(a, f, xv);
+      }
+      int isum = _mm512_reduce_add_epi32(_mm512_add_epi32(
+          _mm512_add_epi32(acc0, acc1), _mm512_add_epi32(acc2, acc3)));
       yr += (float)(isum - 4 * (int)sumxq_sb[sb]) * sx * scale;
     }
     y[row0 + r] = yr;
@@ -284,11 +334,15 @@ int main(int argc, char** argv) {
     else if (s == "--lp") a.lp = atoi(argv[++i]);
   }
   int E = a.experts, NIN = a.n_in, NOUT = a.n_out;
-  auto wts = read_file(a.dir + (a.variant == "lut" ? "\\wts_lut.bin" : "\\wts_bp.bin"));
-  auto xp  = read_file(a.dir + (a.variant == "lut" ? "\\xp_lut.bin" : "\\xp_bp.bin"));
-  auto yr  = read_file(a.dir + (a.variant == "vnni" ? "\\y_ref_vnni.bin" : "\\y_ref.bin"));
+  bool is_vnni = (a.variant == "vnni" || a.variant == "vnni2");
+  auto wts = read_file(a.dir + (a.variant == "lut" ? "\\wts_lut.bin"
+                                : is_vnni ? "\\wts_vnni.bin" : "\\wts_bp.bin"));
+  auto xp  = read_file(a.dir + (a.variant == "lut" ? "\\xp_lut.bin"
+                               : a.variant == "vnni" ? "\\xq_vnni.bin"
+                               : a.variant == "vnni2" ? "\\xq_plain.bin" : "\\xp_bp.bin"));
+  auto yr  = read_file(a.dir + (is_vnni ? "\\y_ref_vnni.bin" : "\\y_ref.bin"));
   std::vector<char> sxq; float sx_vnni = 1.f;
-  if (a.variant == "vnni") {
+  if (is_vnni) {
     sxq = read_file(a.dir + "\\vnni_meta.bin");  // [sx float][sumxq per sb fp32]
     sx_vnni = ((const float*)sxq.data())[0];
   }
@@ -306,6 +360,9 @@ int main(int argc, char** argv) {
       else if (a.variant == "vnni") {
         const float* sumsq = (const float*)(sxq.data() + 4);
         gemv_rows_vnni(W + e * w_per_exp, 0, NOUT, NIN, (const int8_t*)XP, sumsq, sx_vnni, yout + e * NOUT);
+      } else if (a.variant == "vnni2") {
+        const float* sumsq = (const float*)(sxq.data() + 4);
+        gemv_rows_vnni2(W + e * w_per_exp, 0, NOUT, NIN, (const int8_t*)XP, sumsq, sx_vnni, yout + e * NOUT);
       } else
         gemv_rows<1>(W + e * w_per_exp, 0, NOUT, NIN, XP, yout + e * NOUT);
   };

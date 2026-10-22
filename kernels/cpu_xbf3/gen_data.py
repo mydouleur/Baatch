@@ -92,6 +92,7 @@ def main():
                     for t in range(4):
                         xq_layout[sb, b, pg, j, t] = xq[sb * SB + 8 * (16 * b + j) + 4 * pg + t]
     xq_layout.tofile(os.path.join(a.out, "xq_vnni.bin"))
+    xq.tofile(os.path.join(a.out, "xq_plain.bin"))  # vnni2：连续自然序（multishift 免重排）
     sumxq = xq.reshape(IN // SB, SB).sum(axis=1).astype(np.float32)  # 每 sb
     with open(os.path.join(a.out, "vnni_meta.bin"), "wb") as f:
         f.write(np.array([sx], dtype=np.float32).tobytes())
