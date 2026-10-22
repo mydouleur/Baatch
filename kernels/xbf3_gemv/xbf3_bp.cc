@@ -31,7 +31,7 @@ static int16_t g_shift_tab1[8] = {512, 256, 128, 64, 32, 16, 8, 4};    // 1<<(9-
 static int16_t g_shift_tab2[8] = {1024, 512, 256, 128, 64, 32, 16, 8}; // 1<<(10-k)
 static int16_t g_bitmask_tab[8] = {0x0101,0x0202,0x0404,0x0808,0x1010,0x2020,0x4040,(int16_t)0x8080};
 // int16→int8 视图的 DM 暂存
-static int16_t g_scratch16[16] __attribute__((aligned(32)));
+static uint16_t g_scratch16[16] __attribute__((aligned(32)));
 
 // 激活相位平面（fp32），load_act 拷入：8 phase × 2 sb × 32 lanes
 // （非 static：与 xbf3_bp_load.cc 共享，避免 .o 重复符号）
@@ -40,7 +40,7 @@ aie::vector<float, 32> xp_v[8 * XBF3_ROW_SBS];
 
 extern "C"
 void xbf3_gemv_chunk4(const uint8_t* __restrict w, float* __restrict y) {
-  const aie::vector<int16_t, 16> m07 = aie::broadcast<int16_t, 16>(0x0707);
+  const aie::vector<uint16_t, 16> m07 = aie::broadcast<uint16_t, 16>(0x0707);
   const aie::vector<int8_t, 32>  m4  = aie::broadcast<int8_t, 32>(4);
   for (int r = 0; r < CHUNK_ROWS; r++) {
     const uint8_t* rowp = w + r * (XBF3_ROW_SBS * XBF3_SB_BYTES);
@@ -69,7 +69,7 @@ void xbf3_gemv_chunk4(const uint8_t* __restrict w, float* __restrict y) {
         aie::accum<acc32, 16> acc = aie::mul(t0, aie::broadcast<int16_t, 16>(g_shift_tab[k]));
         acc = aie::mac(acc, t1, aie::broadcast<int16_t, 16>(g_shift_tab1[k]));
         acc = aie::mac(acc, t2, aie::broadcast<int16_t, 16>(g_shift_tab2[k]));
-        aie::vector<int16_t, 16> e = aie::bit_and(acc.to_vector<int16_t>(8), m07);
+        aie::vector<uint16_t, 16> e = aie::bit_and(acc.to_vector_sign<uint16_t>(false, 8), m07);
         // int16 车道 → int8 视图只能走 DM 往返（cast_to 窄化会生成非法 shl）
         aie::store_v(g_scratch16, e);
         aie::vector<int8_t, 32> e8 = aie::load_v<32>((const int8_t*)g_scratch16);
@@ -93,7 +93,7 @@ void xbf3_discard_chunk4(const uint8_t* __restrict w, float* __restrict y) {
 // 调试 v2：y = [p0(16f) | p1(16f) | p2(16f) | e8(k=0)(32f) | e8(k=1)(32f) | scale(1f)]
 extern "C"
 void xbf3_debug4(const uint8_t* __restrict w, float* __restrict y) {
-  const aie::vector<int16_t, 16> m07 = aie::broadcast<int16_t, 16>(0x0707);
+  const aie::vector<uint16_t, 16> m07 = aie::broadcast<uint16_t, 16>(0x0707);
   const aie::vector<int8_t, 32>  m4  = aie::broadcast<int8_t, 32>(4);
   const uint8_t* rowp = w;
   aie::vector<int16_t, 16> p0 = *aie::cbegin_unaligned_vector<16>((const int16_t*)(rowp + 2));
@@ -111,7 +111,7 @@ void xbf3_debug4(const uint8_t* __restrict w, float* __restrict y) {
     aie::accum<acc32, 16> acc = aie::mul(t0, aie::broadcast<int16_t, 16>(g_shift_tab[k]));
     acc = aie::mac(acc, t1, aie::broadcast<int16_t, 16>(g_shift_tab1[k]));
     acc = aie::mac(acc, t2, aie::broadcast<int16_t, 16>(g_shift_tab2[k]));
-    aie::vector<int16_t, 16> e = aie::bit_and(acc.to_vector<int16_t>(8), m07);
+    aie::vector<uint16_t, 16> e = aie::bit_and(acc.to_vector_sign<uint16_t>(false, 8), m07);
     aie::store_v(g_scratch16, e);
     aie::vector<int8_t, 32> e8 = aie::load_v<32>((const int8_t*)g_scratch16);
     e8 = aie::bit_xor(e8, m4) - m4;
