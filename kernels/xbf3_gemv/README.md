@@ -48,3 +48,24 @@ arg3=wts / arg4=act / arg5=out（按 runtime sequence 操作数顺序 [wts, act,
 - 关键坑：mlir_aie wheel 不含 Peano（需另装 llvm-aie nightly wheel）；aiecc 的
   xclbin 生成依赖 xclbinutil，缺失时静默成功（exit 0 无产物）；1.3.4 与 main 的
   IRON API 差异大（Runtime()/rt.sequence 习语 vs 新 fn_args 风格）。
+
+## v2/v3 带宽版（M2'-2）
+
+设计演进（全部数值兼容 v1 的 XBF3 布局）：
+
+| 版本 | 结构 | 实测权重流（warm avg） |
+|---|---|---|
+| v1 scalar | shim→core 直送，16 行/块，单专家 | 119 ms/次（小块串行主导） |
+| v2 discard | shim→memtile(256行)→core，E=64 拼接 24.5MB | 8.0 GB/s |
+| v2 discard 大块 | 同上但 128/1024 行块 | 9.6 GB/s |
+| v3 discard 4 列 | 4 列并行（shim→memtile→core），行切分 | 见下（网络中断待补） |
+| v3 scalar 4 列 | 同上 + 真实计算 | 见下 |
+
+### 瓶颈分析（v2 → v3 的依据）
+
+- 单列 discard 8–10 GB/s，把 L2/L1 块从 256/16 行加到 1024/128 行几乎不变（9.6）→
+  **不是 DMA 任务粒度问题，是单列单 shim 通道上限**（对照 M0：df-bw 4 列 8 流道 = 60 GB/s，
+  每 shim 读流道 ≈ 7.5–10 GB/s，吻合）。
+- v3：4 列 ×（shim→memtile→core），行切分（每列 512 行/专家），激活并入每列流首块
+  （规避每 shim 2 MM2S + 1 S2MM 的通道预算——分离 act fifo 时 AIEPlaceTiles 失败）。
+- 已知限制：act 块独占一个 L2 对象（slab 对齐要求），核内跳过填充块。
