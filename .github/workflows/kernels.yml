@@ -40,12 +40,10 @@ jobs:
           AIECC=$(python3 -c "from aie.tools import MLIR_AIE_BIN_DIR as b; print(b)")/aiecc
           "$AIECC" --no-compile-host --no-xchesscc --no-xbridge --peano="$PEANO_INSTALL_DIR" \
             work/aie.mlir \
-            --aie-generate-npu-insts --npu-insts-name=insts.bin \
-            --aie-generate-pdi --pdi-name=design.pdi \
-            --aie-generate-xclbin --xclbin-name=xbf3_gemv.xclbin \
+            --aie-generate-npu-insts --npu-insts-name=build/insts.bin \
+            --aie-generate-pdi --pdi-name=build/design.pdi \
+            --aie-generate-xclbin --xclbin-name=build/xbf3_gemv.xclbin \
             --tmpdir=work --verbose 2>&1 | tail -30 || true
-          cp work/insts.bin work/design.pdi build/ 2>/dev/null || true
-          cp design.pdi build/ 2>/dev/null || true   # bootgen 写在 cwd
           echo "=== work/ ==="; ls -la work/
           echo "=== build/ ==="; ls -la build/
 
