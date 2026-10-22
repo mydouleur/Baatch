@@ -30,17 +30,18 @@ jobs:
           echo "PEANO_INSTALL_DIR=$PEANO_DIR" >> $GITHUB_ENV
           echo "peano dir: $PEANO_DIR"
 
-      - name: Emit MLIR (debug)
+      - name: Inventory bundled tools
         run: |
-          cd kernels/xbf3_gemv
-          python3 xbf3_gemv.py --emit-mlir > build_debug.mlir 2>&1 || true
-          head -50 build_debug.mlir
+          BIN=$(python3 -c "from aie.tools import MLIR_AIE_BIN_DIR as b; print(b)")
+          echo "mlir_aie bin: $BIN"; ls "$BIN"
+          which xclbinutil bootgen aiebu-asm || true
 
       - name: Build xbf3_gemv (compile-only, npu2)
         run: |
           cd kernels/xbf3_gemv
-          XBF3_DEBUG=1 python3 xbf3_gemv.py --xclbin-path build/xbf3_gemv.xclbin --insts-path build/insts.bin 2>&1 | tail -60
-          find . -name "*.xclbin" -o -name "insts.bin" | head
+          python3 xbf3_gemv.py --xclbin-path build/xbf3_gemv.xclbin --insts-path build/insts.bin 2>&1 | tail -20 || true
+          python3 xbf3_gemv.py --full-elf-path build/xbf3_gemv_full.elf 2>&1 | tail -20 || true
+          find . -name "*.xclbin" -o -name "*.elf" -o -name "insts.bin" | head
 
       - name: Upload artifacts
         if: always()
