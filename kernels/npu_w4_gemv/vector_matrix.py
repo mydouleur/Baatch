@@ -16,7 +16,7 @@ try:
     from aie.helpers.dialects.ext.scf import _for as range_
 except ModuleNotFoundError:
     from aie.helpers.dialects.scf import _for as range_  # mlir_aie 1.3.4（无 ext 层）
-from aie.helpers.taplib import TensorAccessPattern, TensorAccessSequence
+from aie.helpers.taplib import TensorAccessPattern
 
 def ceildiv(a, b):
     return (a + b - 1) // b
