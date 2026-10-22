@@ -39,7 +39,11 @@ int main(int argc, char** argv) {
   int iters = argc > 4 ? atoi(argv[4]) : 20;
   bool verify = !(argc > 5 && std::string(argv[5]) == "--noverify");
   int ncols = 1;
-  for (int i = 5; i + 1 < argc; i++) if (std::string(argv[i]) == "--cols") ncols = atoi(argv[i+1]);
+  long exp_override = -1;
+  for (int i = 5; i + 1 < argc; i++) {
+    if (std::string(argv[i]) == "--cols") ncols = atoi(argv[i+1]);
+    if (std::string(argv[i]) == "--experts") exp_override = atol(argv[i+1]);
+  }
 
   auto wts = read_file(dir + "\\wts.bin");
   auto act = read_file(dir + "\\act.bin");
@@ -48,7 +52,7 @@ int main(int argc, char** argv) {
   size_t instr_words = instr.size() / 4;
   size_t out_bytes = verify ? ref.size() : 2048 * 4;
   // v2: out size = E * 2048 * 4; derive E from wts size (401408B/expert)
-  size_t n_exp = wts.size() / 401408;
+  size_t n_exp = exp_override > 0 ? (size_t)exp_override : wts.size() / 401408;
   if (!verify) out_bytes = n_exp * 2048 * 4;
 
   try {
@@ -90,6 +94,11 @@ int main(int argc, char** argv) {
 
     int bad = 0;
     float max_rel = 0;
+    {  // dump 全量输出供离线分析
+      auto* yp = bo_out.map<float*>();
+      std::ofstream of("out_npu.bin", std::ios::binary);
+      of.write((char*)yp, out_bytes);
+    }
     if (verify) {
       const float* yb = bo_out.map<const float*>();
       const float* yr = reinterpret_cast<const float*>(ref.data());
