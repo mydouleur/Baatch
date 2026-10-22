@@ -1,0 +1,33 @@
+# 数据与产物（一律脚本拉取/再生，不进仓库）
+models/
+ref/
+build/
+out/
+
+# 探针运行产物
+probes/**/run_*.log
+probes/**/iters*.csv
+probes/**/Work/
+probes/**/xrt_src/
+probes/**/*.exe
+probes/**/*.obj
+probes/**/*.lib
+probes/**/*.def
+probes/**/*.exp
+probes/**/*.xclbin
+probes/**/*.elf
+!probes/**/*.py
+!probes/**/*.cpp
+
+# 工具链环境
+.venv/
+__pycache__/
+*.pyc
+
+# 安装包与大文件
+*.exe
+*.bin
+
+# 系统
+.DS_Store
+Thumbs.db
