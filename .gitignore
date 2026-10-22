@@ -33,3 +33,5 @@ __pycache__/
 Thumbs.db
 kernels/**/art*/
 kernels/**/b*/
+kernels/**/data*/
+kernels/**/stub*/
