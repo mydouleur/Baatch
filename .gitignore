@@ -32,3 +32,4 @@ __pycache__/
 .DS_Store
 Thumbs.db
 kernels/**/art*/
+kernels/**/b_*/
