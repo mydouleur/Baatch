@@ -36,3 +36,4 @@ kernels/**/b*/
 kernels/**/data*/
 kernels/**/stub*/
 kernels/**/tmp/
+kernels/**/*.obj
