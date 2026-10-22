@@ -187,3 +187,12 @@ xdna_llm/
 - M2' XBF3 GEMV kernel 打满带宽 → 单专家 decode 路径（纯读探针建议在此阶段以 MemTile sink ctrlcode 合成补上）
 - M3' 全模型 decode（GDN decode 融合 kernel + CPU 兜底小 op）+ turbo 分流
 - M4' MTP 投机（含 n_rs_seq 快照回滚）+ prefill 优化（GDN chunk kernel 可 CPU 兜底起步）+ serve 层
+
+## 10. 前缀缓存（prefix cache，M4' serve 层特性，架构需预留）
+
+**场景**：agentic coding 的系统提示+代码上下文前缀每轮重复，命中后 TTFT 从 ~25 s（50k token）降到 ~几十毫秒。
+
+- 10 层全注意力：经典 KV 前缀缓存（按 token 前缀哈希索引，分页块对齐）
+- 30 层线性注意力：**SSM 状态快照恒定 63 MB**（30 层 × 2 MiB + conv），与前缀长度无关——比纯 transformer 的线性增长 KV 缓存优雅一个量级，可随便存几十上百个会话断点
+- **与 MTP 回滚共用机制**：MTP 的 n_rs_seq 快照和前缀缓存是同一套 GDN 状态快照设施
+- 架构预留（M2'/M3' 就要做对）：SSM 状态可序列化布局、KV 分页按前缀块边界对齐
