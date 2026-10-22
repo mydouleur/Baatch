@@ -30,7 +30,8 @@ from aie.iron import (
     jit,
 )
 from aie.iron.controlflow import range_
-from aie.utils.hostruntime.argparse import add_compile_args, device_from_args
+from aie.utils.hostruntime.argparse import add_compile_args
+from aie.iron.device import NPU2
 from aie.utils.hostruntime.cli import run_design_cli
 
 IN = 512
@@ -144,7 +145,7 @@ def main():
                         "ncols": opts.ncols, "chunk_rows": opts.chunk_rows,
                         "l2_rows": opts.l2_rows},
         run_and_verify=None,
-        device=device_from_args,
+        device=lambda opts: NPU2(),  # 全 8 列设备（默认 NPU2Col1 放不下 4 列设计）
     )
 
 
