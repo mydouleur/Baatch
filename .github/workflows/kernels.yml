@@ -26,7 +26,7 @@ jobs:
         run: |
           echo "TODO: 第一个自研 kernel (kernels/xbf3_gemv) 落地后替换为正式构建"
           echo "当前仅验证工具链可用性"
-          || which aie-opt aie-translate || true
+          which aiecc.py aie-opt aie-translate && echo "toolchain listed"
 
       - name: Upload artifacts
         if: always()
