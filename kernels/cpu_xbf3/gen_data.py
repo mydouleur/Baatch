@@ -50,9 +50,11 @@ def main():
 
     # 规范 pack3 / 位平面 pack3_bp（E 个专家各自独立）
     packed_lut = xbf3.pack3(q).reshape(E, OUT, IN // SB, 96)
+    # VNNI: offset-binary field = q+4
+    packed_vnni = xbf3.pack3(q + 4).reshape(E, OUT, IN // SB, 96)
     packed_bp = xbf3.pack3_bp(q).reshape(E, OUT, IN // SB, 96)
 
-    for packed, name in ((packed_lut, "wts_lut.bin"), (packed_bp, "wts_bp.bin")):
+    for packed, name in ((packed_lut, "wts_lut.bin"), (packed_bp, "wts_bp.bin"), (packed_vnni, "wts_vnni.bin")):
         row = np.empty((E, OUT, IN // SB, ROW_B), dtype=np.uint8)
         row[:, :, :, 0] = (s_bf & 0xFF).astype(np.uint8)
         row[:, :, :, 1] = (s_bf >> 8).astype(np.uint8)
@@ -79,8 +81,31 @@ def main():
                 xp_bp[p, k, sb, :] = x[sb * SB + 8 * np.arange(32) + k] * pw[p]
     xp_bp.tofile(os.path.join(a.out, "xp_bp.bin"))
 
-    # 参考：fp64，每专家独立；scale 用 bf16 舍入值（与 kernel 消费的一致）
+    # VNNI 数据：xq = round(x/sx)，sx = max|x|/127；布局 [sb][b][pg][lane][t]
+    sx = float(np.abs(x).max() / 127.0)
+    xq = np.round(x / sx).astype(np.int8)                       # (IN,)
+    xq_layout = np.zeros((IN // SB, 2, 2, 16, 4), dtype=np.int8)
+    for sb in range(IN // SB):
+        for b in range(2):
+            for pg in range(2):
+                for j in range(16):
+                    for t in range(4):
+                        xq_layout[sb, b, pg, j, t] = xq[sb * SB + 8 * (16 * b + j) + 4 * pg + t]
+    xq_layout.tofile(os.path.join(a.out, "xq_vnni.bin"))
+    sumxq = xq.reshape(IN // SB, SB).sum(axis=1).astype(np.float32)  # 每 sb
+    with open(os.path.join(a.out, "vnni_meta.bin"), "wb") as f:
+        f.write(np.array([sx], dtype=np.float32).tobytes())
+        f.write(sumxq.tobytes())
+    # 参考（vnni）：y = Σ_sb (Σ field·xq − 4·Σxq) · sx · scale
     s_kernel = (s_bf.astype(np.uint32) << 16).view(np.float32)
+    fld = (q + 4).reshape(E, OUT, IN // SB, SB).astype(np.float64)
+    xq_sb = xq.reshape(IN // SB, SB).astype(np.float64)
+    yv = (np.einsum("eosb,sb->eos", fld, xq_sb)
+          - 4.0 * sumxq.astype(np.float64)[None, None, :])          * (sx * s_kernel.astype(np.float64))
+    y_vnni = yv.sum(axis=-1)
+    y_vnni.astype(np.float32).tofile(os.path.join(a.out, "y_ref_vnni.bin"))
+
+    # 参考：fp64，每专家独立；scale 用 bf16 舍入值（与 kernel 消费的一致）
     w_dq = (q.reshape(E, OUT, IN // SB, SB).astype(np.float32) * s_kernel[..., None]).reshape(E, OUT, IN)
     y = w_dq.astype(np.float64) @ x.astype(np.float64)
     y.astype(np.float32).tofile(os.path.join(a.out, "y_ref.bin"))

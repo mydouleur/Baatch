@@ -215,6 +215,49 @@ void gemv_rows(const uint8_t* w, int row0, int nrows, int n_in,
   }
 }
 
+// ---------------- 变体 C：VNNI（vpdpbusd, W3A8） ----------------
+// 打包为 offset-binary：field = q+4 ∈ [0,7]（3-bit），q = field − 4（线性！）
+// 每 32-bit 车道装 4 相位：byte t = phase (4pg+t) 的 field。
+// vpdpbusd(acc, field_u8, xq_s8)；y = (acc_int − 4·Σxq_sb) · sx · scale_sb。
+void gemv_rows_vnni(const uint8_t* w, int row0, int nrows, int n_in,
+                    const int8_t* xq, const float* sumxq_sb, float sx,
+                    float* y) {
+  const int sb_per_row = n_in / SB;
+  for (int r = 0; r < nrows; r++) {
+    const uint8_t* rowp = w + (size_t)(row0 + r) * sb_per_row * ROW_BYTES;
+    float yr = 0.f;
+    for (int sb = 0; sb < sb_per_row; sb++) {
+      const uint8_t* wsb = rowp + sb * ROW_BYTES;
+      float scale = bf16_to_f32(wsb[0] | (wsb[1] << 8));
+      __m512i acc0 = _mm512_setzero_si512(), acc1 = _mm512_setzero_si512();
+      __m512i acc2 = _mm512_setzero_si512(), acc3 = _mm512_setzero_si512();
+      for (int b = 0; b < 2; b++) {
+        __m512i z = _mm512_maskz_loadu_epi8(0x0000FFFFFFFFFFFFULL, wsb + 2 + 48 * b);
+        __m512i g = _mm512_permutexvar_epi8(VPERMB_IDX, z);
+        for (int pg = 0; pg < 2; pg++) {
+          __m512i v0 = _mm512_and_si512(_mm512_srli_epi32(g, 12 * pg + 0), SEVEN);
+          __m512i v1 = _mm512_and_si512(_mm512_srli_epi32(g, 12 * pg + 3), SEVEN);
+          __m512i v2 = _mm512_and_si512(_mm512_srli_epi32(g, 12 * pg + 6), SEVEN);
+          __m512i v3 = _mm512_and_si512(_mm512_srli_epi32(g, 12 * pg + 9), SEVEN);
+          __m512i q = _mm512_or_si512(
+              _mm512_or_si512(v0, _mm512_slli_epi32(v1, 8)),
+              _mm512_slli_epi32(_mm512_or_si512(v2, _mm512_slli_epi32(v3, 8)), 16));
+          // xq 布局: [sb][b][pg][lane j][byte t] = xq[8(16b+j) + 4pg + t]
+          const int8_t* xqb = xq + (((sb * 2 + b) * 2 + pg) * 64);
+          __m512i xv = _mm512_loadu_si512(xqb);
+          __m512i& a = (b ? (pg ? acc3 : acc2) : (pg ? acc1 : acc0));  // 4 独立累加器（idot 论文）
+          a = _mm512_dpbusd_epi32(a, q, xv);
+        }
+      }
+      int isum = _mm512_reduce_add_epi32(_mm512_add_epi32(
+          _mm512_add_epi32(acc0, acc1), _mm512_add_epi32(acc2, acc3)));
+      if (r == 0) printf("    dbg sb%d isum=%d scale=%f\n", sb, isum, scale);
+      yr += (float)(isum - 4 * (int)sumxq_sb[sb]) * sx * scale;
+    }
+    y[row0 + r] = yr;
+  }
+}
+
 // ---------------- harness ----------------
 struct Args {
   std::string variant = "lut";
@@ -243,7 +286,12 @@ int main(int argc, char** argv) {
   int E = a.experts, NIN = a.n_in, NOUT = a.n_out;
   auto wts = read_file(a.dir + (a.variant == "lut" ? "\\wts_lut.bin" : "\\wts_bp.bin"));
   auto xp  = read_file(a.dir + (a.variant == "lut" ? "\\xp_lut.bin" : "\\xp_bp.bin"));
-  auto yr  = read_file(a.dir + "\\y_ref.bin");
+  auto yr  = read_file(a.dir + (a.variant == "vnni" ? "\\y_ref_vnni.bin" : "\\y_ref.bin"));
+  std::vector<char> sxq; float sx_vnni = 1.f;
+  if (a.variant == "vnni") {
+    sxq = read_file(a.dir + "\\vnni_meta.bin");  // [sx float][sumxq per sb fp32]
+    sx_vnni = ((const float*)sxq.data())[0];
+  }
   const uint8_t* W = (const uint8_t*)wts.data();
   const float* XP = (const float*)xp.data();
   const float* YR = (const float*)yr.data();
@@ -255,7 +303,10 @@ int main(int argc, char** argv) {
     for (int e = e0; e < e1; e++)
       if (a.variant == "lut")
         gemv_rows_lut4(W + e * w_per_exp, 0, NOUT, NIN, XP, yout + e * NOUT);
-      else
+      else if (a.variant == "vnni") {
+        const float* sumsq = (const float*)(sxq.data() + 4);
+        gemv_rows_vnni(W + e * w_per_exp, 0, NOUT, NIN, (const int8_t*)XP, sumsq, sx_vnni, yout + e * NOUT);
+      } else
         gemv_rows<1>(W + e * w_per_exp, 0, NOUT, NIN, XP, yout + e * NOUT);
   };
 
@@ -263,6 +314,8 @@ int main(int argc, char** argv) {
   {
     run_slice(0, E, Y.data());
     int bad = 0; float max_rel = 0;
+    for (size_t i = 0; i < 4 && i < (size_t)E * NOUT; i++)
+      printf("  dbg y[%zu]=%f ref=%f\n", i, Y[i], YR[i]);
     for (size_t i = 0; i < (size_t)E * NOUT; i++) {
       float d = fabsf(Y[i] - YR[i]);
       float rel = d / (fabsf(YR[i]) + 1e-6f);
