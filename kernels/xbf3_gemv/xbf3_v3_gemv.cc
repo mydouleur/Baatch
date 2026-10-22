@@ -1,4 +1,16 @@
 // ---- v3 (multi-column, act streamed as chunk 0) ----
+#include <stdint.h>
+
+#define XBF3_IN 512
+#define XBF3_SB 256
+#define XBF3_ROW_SBS (XBF3_IN / XBF3_SB)
+#define XBF3_SB_BYTES (2 + XBF3_SB * 3 / 8)
+#ifdef CHUNK_ROWS_C
+#define CHUNK_ROWS CHUNK_ROWS_C
+#else
+#define CHUNK_ROWS 16
+#endif
+
 // 静态激活缓冲（定义在此 TU，load_act 里 extern 引用）
 float xbuf_v3[512];
 
