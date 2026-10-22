@@ -117,7 +117,7 @@ Backend：
 - **M3'**：全模型 decode + KV cache + turbo 分流
   - 预实验（go/no-go 门）：
     - 0b CPU 3-bit LUT GEMV：验收 **2 大核 ≥24 GB/s**（45 GB/s 需 4 核，超预算不进首发）🔄
-    - 0a NPU 4-bit GEMV（参照 TileFuse，同硅片 AIE2P）：验收 ≥55 GB/s；真实风险 = 其交错预平铺布局耦合，非 ISA
+    - 0a NPU 4-bit GEMV（参照 TileFuse，同硅片 AIE2P）：❌ **未达标**（2026-10-23 实测 max 29.5 GB/s + Peano 对反量化链的值相关 lowering bug，TileFuse 官方走 xchesscc 不受影响）。**NPU 短期转 prefill 专用**；decode 主线 = CPU vnni2（2 核 39 GB/s → 裸 ~29 tok/s ×MTP ~52）。xchesscc/Vitis 路线留档待授权
     - 0c 汇合同步延迟：✅ **GO**（2026-10-23 实测，probes/sync_latency/）——单次汇合 p50 70µs / p99 108µs，占 60 tok/s 帧预算 0.42%；提交 doorbell 4.8µs；阻塞 wait 仅比忙轮询多 6µs（且忙轮询有提前"假完成"坑，禁用）；地板由 NPU 命令处理主导，常驻 kernel 还有压缩空间
 - **M4'**：MTP 投机解码
 - 风险排序：M1' 量化质量 > M2' kernel 学习曲线 > 驱动/工具链成熟度
