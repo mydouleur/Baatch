@@ -23,7 +23,7 @@ void xbf3_gemv_chunk(const uint8_t* __restrict w, const float* __restrict x,
   for (int r = 0; r < CHUNK_ROWS; r++) {
     const uint8_t* rowp = w + r * (XBF3_ROW_SBS * XBF3_SB_BYTES);
     float acc = 0.0f;
-    for (int sb = 0; sb < XBF3_ROW_SBS; sb++) {
+    for (int sb = 0; sb < XBF3_ROW_SBS; sb++, rowp += XBF3_SB_BYTES) {
       // BF16 scale, little-endian 2B -> fp32 by placing into high half-word
       uint32_t sbits = (uint32_t)rowp[0] | ((uint32_t)rowp[1] << 8);
       uint32_t fbits = sbits << 16;

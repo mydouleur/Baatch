@@ -80,6 +80,10 @@ int main(int argc, char** argv) {
       if (i == 0) std::printf("iter0 %.3f ms\n", times[0] * 1e3);
     }
 
+    // dump for offline analysis
+    { auto* yp = bo_out.map<float*>();
+      std::ofstream of("out_npu.bin", std::ios::binary);
+      of.write((char*)yp, 2048*4); }
     // verify
     const float* y = bo_out.map<const float*>();
     const float* yr = reinterpret_cast<const float*>(ref.data());
