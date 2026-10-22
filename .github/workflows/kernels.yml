@@ -30,11 +30,19 @@ jobs:
           echo "PEANO_INSTALL_DIR=$PEANO_DIR" >> $GITHUB_ENV
           echo "peano dir: $PEANO_DIR"
 
+      - name: Emit MLIR (debug)
+        run: |
+          cd kernels/xbf3_gemv
+          python3 xbf3_gemv.py --emit-mlir > build_debug.mlir 2>&1 || true
+          head -50 build_debug.mlir
+
       - name: Build xbf3_gemv (compile-only, npu2)
         run: |
           cd kernels/xbf3_gemv
-          python3 xbf3_gemv.py --xclbin-path build/xbf3_gemv.xclbin --insts-path build/insts.bin
-          ls -la build/
+          python3 xbf3_gemv.py --xclbin-path build/xbf3_gemv.xclbin --insts-path build/insts.bin || true
+          find . -name "*.xclbin" -o -name "*.bin" -o -name "*.mlir" | head -20
+          ls -la build/ 2>/dev/null || true
+          exit 1
 
       - name: Upload artifacts
         if: always()

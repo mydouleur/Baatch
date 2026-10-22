@@ -85,7 +85,7 @@ def xbf3_gemv(wts: In, act: In, out: Out):
 
 def _make_argparser():
     p = argparse.ArgumentParser(prog="xbf3_gemv")
-    add_compile_args(p, default_dev="npu2")
+    add_compile_args(p, default_dev="npu2", with_emit_mlir=True)
     return p
 
 
