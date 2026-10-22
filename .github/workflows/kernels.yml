@@ -21,7 +21,14 @@ jobs:
           pip install mlir_aie -f https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4
           pip install llvm-aie -f https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
           python3 -c "from aie.iron import Kernel; print('IRON OK')"
-          python3 -c "import sysconfig,os; p=os.path.join(sysconfig.get_path('platlib'),'llvm-aie','bin'); print('peano at', p, os.listdir(p) if os.path.isdir(p) else 'MISSING')"
+          # Peano (llvm-aie) 安装位置探测：mlir-aie 的 peano_install_dir 只认
+          # $PEANO_INSTALL_DIR 或 platlib/llvm-aie，wheel 实际布局可能不同
+          LOC=$(pip show llvm-aie | awk '/^Location:/{print $2}')
+          CLANG=$(find "$LOC" -maxdepth 4 -name "clang++" | head -1)
+          echo "clang++ found at: $CLANG"
+          PEANO_DIR=$(dirname "$(dirname "$CLANG")")
+          echo "PEANO_INSTALL_DIR=$PEANO_DIR" >> $GITHUB_ENV
+          echo "peano dir: $PEANO_DIR"
 
       - name: Build xbf3_gemv (compile-only, npu2)
         run: |
