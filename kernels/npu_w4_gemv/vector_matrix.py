@@ -163,7 +163,7 @@ def my_matmul(dev, N, K):
                         f"inB{row}{col}", 
                         MemTiles[col], 
                         cores[row][col], 
-                        2, 
+                        1,  # depth 1：核内 DM 预算差 256B（Peano 布局比 chess 松）；L2 侧仍双缓冲
                         B_ty,
                         # MM2S pattern to read the transformed B tiles with new_n (includes scaling factors)
                         # [
