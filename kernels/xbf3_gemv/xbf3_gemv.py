@@ -51,7 +51,7 @@ chunk_out_ty = np.ndarray[(CHUNK_ROWS,), np.dtype[np.float32]]
 
 
 @jit
-def xbf3_gemv(wts: In, act: In, out: Out, *, dev=None):
+def xbf3_gemv(wts: In, act: In, out: Out):
     fn = ExternalFunction(
         "xbf3_gemv_chunk",
         source_file="xbf3_gemv.cc",
