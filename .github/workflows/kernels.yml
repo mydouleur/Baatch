@@ -19,14 +19,13 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip
           pip install mlir_aie -f https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4
-          pip install -r <(echo "ml_dtypes") 2>/dev/null || true
           python3 -c "from aie.iron import Kernel; print('IRON OK')"
 
-      - name: Smoke build (passthrough example)
+      - name: Build xbf3_gemv (compile-only, npu2)
         run: |
-          echo "TODO: 第一个自研 kernel (kernels/xbf3_gemv) 落地后替换为正式构建"
-          echo "当前仅验证工具链可用性"
-          which aiecc.py aie-opt aie-translate && echo "toolchain listed"
+          cd kernels/xbf3_gemv
+          python3 xbf3_gemv.py --xclbin-path build/xbf3_gemv.xclbin --insts-path build/insts.bin
+          ls -la build/
 
       - name: Upload artifacts
         if: always()
@@ -35,5 +34,7 @@ jobs:
           name: kernels-xclbin
           path: |
             kernels/**/*.xclbin
+            kernels/**/*.bin
             kernels/**/*.elf
+            kernels/**/build/**
           if-no-files-found: ignore
