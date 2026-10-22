@@ -39,6 +39,7 @@ from aie.utils.hostruntime.cli import run_design_cli
 # ---- shape constants ----
 IN = 512
 OUT = 2048
+SB = 256
 SB_BYTES = 98
 ROW_BYTES = (IN // SB) * SB_BYTES        # 196
 CHUNK_ROWS = 16
