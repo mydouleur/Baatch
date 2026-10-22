@@ -58,8 +58,8 @@ arg3=wts / arg4=act / arg5=out（按 runtime sequence 操作数顺序 [wts, act,
 | v1 scalar | shim→core 直送，16 行/块，单专家 | 119 ms/次（小块串行主导） |
 | v2 discard | shim→memtile(256行)→core，E=64 拼接 24.5MB | 8.0 GB/s |
 | v2 discard 大块 | 同上但 128/1024 行块 | 9.6 GB/s |
-| v3 discard 4 列 | 4 列并行（shim→memtile→core），行切分 | 见下（网络中断待补） |
-| v3 scalar 4 列 | 同上 + 真实计算 | 见下 |
+| v3 discard 4 列 | 4 列并行（shim→memtile→core），行切分，E=64 | **min 23.4 / avg 29.1 / max 30.3 GB/s**（50 次，warm） |
+| v3 scalar 4 列 | 同上 + 真实计算 | verify **PASS**（max_rel 1.11e-04）；有效流 0.11 GB/s（计算墙） |
 
 ### 瓶颈分析（v2 → v3 的依据）
 
@@ -69,3 +69,16 @@ arg3=wts / arg4=act / arg5=out（按 runtime sequence 操作数顺序 [wts, act,
 - v3：4 列 ×（shim→memtile→core），行切分（每列 512 行/专家），激活并入每列流首块
   （规避每 shim 2 MM2S + 1 S2MM 的通道预算——分离 act fifo 时 AIEPlaceTiles 失败）。
 - 已知限制：act 块独占一个 L2 对象（slab 对齐要求），核内跳过填充块。
+
+### v3 结论（2026-10-22 收尾）
+
+- **数值正确性保持**：v3 scalar 四列 × 64 专家（131072 输出）verify PASS，
+  max_rel=1.11e-04 与 v1 完全相同（图样 bug 史：chunk_rows 不一致时"每块只对前 16 行"）。
+- **未达 55 GB/s**。当前管线上限 ~30 GB/s（4 列 × 单 MM2S 通道）；达 55+ 需要：
+  (a) 每列双 MM2S 通道或 8 列（df-bw 实测 8 流道 = 60 GB/s）；
+  (b) **向量化 unpack+MAC**（标量 fp32 是 0.11 GB/s 的计算墙，距管线 ~270×，
+      需 aie2p intrinsics bf16/int8 向量车道，~64–512 MAC/cycle）。
+- 编译链坑（v3 调试记录）：`NPU2Col1` 是 `-d npu2` 的默认设备（多列设计必须显式
+  `NPU2()`）；手工 aiecc 管线里 ExternalFunction 的 compile_flags 不生效
+  （-D 须加在 clang++ 命令行）；多 kernel .o 符号重复（同一 .cc 复制多份 .o →
+  ld.lld duplicate symbol，须拆源文件）；artifact 里 build_*/work_* 目录定位。
