@@ -121,7 +121,11 @@ Backend：
 ## 9. 架构级修正（2026-10-22，M2' 实证驱动）：按阶段分工
 
 - **prefill → NPU**：3-bit unpack 成本被 prompt batch 摊薄（每权重 unpack 一次复用 M 次），50 TOPS 满阵列，预期 1500–2500 tok/s
-- **decode → CPU AVX-512（主力）**：3-bit LUT 反量化是 vpermb 主场（IQ3_XXS 的设计原点），Zen5 无车道错配问题；预期 ~50 GB/s → 裸 ~35 tok/s ×MTP ~63
-- NPU decode 仅可选增强：4-bit 部件（attn 投影/lm_head 车道对齐，NPU 算得动）+ CPU 3-bit 专家的混合 decode，理论 ~47 tok/s，M3' 后期实测决定
-- 功耗预期修正：decode ~25–30 W（4 大核 + DRAM），仍远低于纯 CPU 45–55 W；纯 NPU decode 的 12–18 W 目标放弃
-- turbo 含义更新：不再是"NPU+CPU 分流专家"（NPU 算不动 3-bit 专家），而是 decode 期 4-bit/3-bit 部件的 NPU/CPU 分工
+- **decode → CPU AVX-512 + NPU 4-bit 部件并行（思路 2 定案）**：
+  - CPU（2 大核）：3-bit 专家 FFN（LUT/vpermb 主场），~24–30 GB/s
+  - NPU：4-bit 部件（attn 投影 + lm_head，车道对齐），~55–60 GB/s
+  - **聚合目标 85–90 GB/s** → 裸 decode ~60 tok/s，×MTP ~110；带宽三档旋钮（全速 2 核+NPU / 均衡 1 核 / 后台纯 NPU）
+- 功耗预期：decode ~20–25 W（2 大核 + NPU + DRAM），仍远低于纯 CPU 45–55 W
+- **参照资产：TileFuse**（[arXiv 2606.11357](https://arxiv.org/pdf/2606.11357)，源码 github.com/glassescrab/mlir-aie fork）——同硅片 W4A16 GEMV 公开实现：memcore 辅助 2D 权重分发（32 核全开实证）、加宽微内核（64 输出/迭代）、离线交错预平铺。M3' NPU 4-bit GEMV 直接参照
+- **已评审并弃用**：T-MAN 表查找（XBF3 均匀量化无码本稀疏性可利用，AIE2P select 实测贵）；PMPD 渐进精度（与 MTP 同轴，MTP 更便宜）；AIE2P 编译期 LUT（仅常量表，对均匀量化无意义）
+- **思路 1（3-bit NPU decode kernel）封存入档**：终审判决——3-bit 与 AIE2P 车道结构性错配（v1–v7 七版实测，0.57 GB/s 真实计算封顶；修正版双 2-bit 平面 修法B：q=3u₂+u₁−4 见 kernels/xbf3_gemv/README.md）。重启条件：①M3' 实测 decode 明确 CPU 侧瓶颈且有带宽余量；②必须吸收 TileFuse memcore 2D 分发 + 加宽微内核；③现实预期 ~10–15 GB/s（插件级，非主力）
