@@ -52,48 +52,54 @@ def xbf3_gemv_v3(wts: In, act: In, out: Out, *,
     assert l2_rows % chunk_rows == 0 and OUT % NC == 0 and rows_per_col % chunk_rows == 0
     chunks_per_col = (rows_per_col // chunk_rows) * E
 
-    wts_ty = np.ndarray[(NC * E * rows_per_col * ROW_BYTES,), np.dtype[np.uint8]]
-    act_ty = np.ndarray[(NC * IN,), np.dtype[np.float32]]
+    slab_bytes = CHUNK_WTS + E * rows_per_col * ROW_BYTES   # act 块 + 权重
+    wts_ty = np.ndarray[(NC * slab_bytes,), np.dtype[np.uint8]]
+    act_ty = np.ndarray[(4,), np.dtype[np.float32]]  # 占位，不用
     out_ty = np.ndarray[(NC * E * rows_per_col,), np.dtype[np.float32]]
-    act_col_ty = np.ndarray[(IN,), np.dtype[np.float32]]
     chunk_wts_ty = np.ndarray[(CHUNK_WTS,), np.dtype[np.uint8]]
     chunk_out_ty = np.ndarray[(chunk_rows,), np.dtype[np.float32]]
     l2_wts_ty = np.ndarray[(L2_WTS,), np.dtype[np.uint8]]
     wts_col_ty = np.ndarray[(E * rows_per_col * ROW_BYTES,), np.dtype[np.uint8]]
     out_col_ty = np.ndarray[(E * rows_per_col,), np.dtype[np.float32]]
 
-    c_name = "xbf3_gemv_chunk" if core_mode == "scalar" else "xbf3_discard_chunk"
+    c_name = "xbf3_gemv_chunk3" if core_mode == "scalar" else "xbf3_discard_chunk3"
     fn = ExternalFunction(
         c_name,
         source_file="xbf3_gemv.cc",
-        arg_types=[chunk_wts_ty, act_col_ty, chunk_out_ty],
+        arg_types=[chunk_wts_ty, chunk_out_ty],
         compile_flags=["-O2", f"-DCHUNK_ROWS_C={chunk_rows}"],
     )
 
-    of_wts, of_act, of_out = [], [], []
+    of_wts, of_out = [], []
     workers = []
 
     def make_body():
-        def core_body(of_wts, of_act, of_out, fn):
-            x = of_act.acquire(1)
+        def core_body(of_wts, of_out, ld, fn):
+            w0 = of_wts.acquire(1)
+            ld(w0, w0)          # 首块 = 激活（拷进静态 xbuf）
+            of_wts.release(1)
             for _ in range_(chunks_per_col):
                 w = of_wts.acquire(1)
                 y = of_out.acquire(1)
-                fn(w, x, y)
+                fn(w, y)
                 of_wts.release(1)
                 of_out.release(1)
-            of_act.release(1)
         return core_body
+
+    ld = ExternalFunction(
+        "xbf3_load_act",
+        source_file="xbf3_gemv.cc",
+        arg_types=[chunk_wts_ty, chunk_wts_ty],
+        compile_flags=["-O2", f"-DCHUNK_ROWS_C={chunk_rows}"],
+    )
 
     for c in range(NC):
         l2 = ObjectFifo(l2_wts_ty, name=f"wts_l2_{c}", depth=2)
         l1 = l2.cons().forward(obj_type=chunk_wts_ty, name=f"wts_l1_{c}")
-        fa = ObjectFifo(act_col_ty, name=f"act_{c}")
         fo = ObjectFifo(chunk_out_ty, name=f"out_{c}")
         of_wts.append(l2)
-        of_act.append(fa)
         of_out.append(fo)
-        workers.append(Worker(make_body(), fn_args=[l1.cons(), fa.cons(), fo.prod(), fn]))
+        workers.append(Worker(make_body(), fn_args=[l1.cons(), fo.prod(), ld, fn]))
 
     rt = Runtime()
     # sequence buffers: [wts, act, out]; per-column fill/drain over contiguous slices.
@@ -101,17 +107,14 @@ def xbf3_gemv_v3(wts: In, act: In, out: Out, *,
     # tap suffices: each column takes one contiguous slab.
     from aie.helpers.taplib.tensortiler2d import TensorTiler2D
 
-    wts_taps = TensorTiler2D.simple_tiler(
-        (1, NC * E * rows_per_col * ROW_BYTES), (1, E * rows_per_col * ROW_BYTES))
-    act_taps = TensorTiler2D.simple_tiler((1, NC * IN), (1, IN))
+    _ = wts_col_ty  # unused
     out_taps = TensorTiler2D.simple_tiler((1, NC * E * rows_per_col), (1, E * rows_per_col))
 
+    slab_taps = TensorTiler2D.simple_tiler((1, NC * slab_bytes), (1, slab_bytes))
     with rt.sequence(wts_ty, act_ty, out_ty) as (w_h, a_h, o_h):
         rt.start(*workers)
         for c in range(NC):
-            rt.fill(of_act[c].prod(), a_h, act_taps[c])
-        for c in range(NC):
-            rt.fill(of_wts[c].prod(), w_h, wts_taps[c])
+            rt.fill(of_wts[c].prod(), w_h, slab_taps[c])
         for c in range(NC):
             rt.drain(of_out[c].cons(), o_h, out_taps[c], wait=(c == NC - 1))
 

@@ -58,6 +58,15 @@ def main():
         rpc = OUT // a.cols
         wts = wts.reshape(a.experts, a.cols, rpc * ROW_B)  # [E][col][rows]
         wts = np.transpose(wts, (1, 0, 2)).reshape(-1)     # [col][E][rows]
+        # v3：每列 slab = [act 块(chunk_rows*196B, 前 2048B 是 fp32 x)][列权重]
+        chunk_bytes = 128 * ROW_B
+        actpad = np.zeros(chunk_bytes, dtype=np.uint8)
+        actpad[: IN * 4] = x.view(np.uint8)
+        col_bytes = wts.nbytes // a.cols
+        slabs = b"".join(
+            actpad.tobytes() + wts[c * col_bytes:(c + 1) * col_bytes].tobytes()
+            for c in range(a.cols))
+        wts = np.frombuffer(slabs, dtype=np.uint8).copy()
     wts.tofile(os.path.join(a.out, "wts.bin"))
     xa = np.tile(x, a.cols) if a.cols > 1 else x
     xa.tofile(os.path.join(a.out, "act.bin"))
