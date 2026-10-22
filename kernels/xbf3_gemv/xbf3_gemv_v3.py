@@ -66,7 +66,7 @@ def xbf3_gemv_v3(wts: In, act: In, out: Out, *,
     c_name = "xbf3_gemv_chunk3" if core_mode == "scalar" else "xbf3_discard_chunk3"
     fn = ExternalFunction(
         c_name,
-        source_file="xbf3_gemv.cc",
+        source_file="xbf3_v3_gemv.cc",
         arg_types=[chunk_wts_ty, chunk_out_ty],
         compile_flags=["-O2", f"-DCHUNK_ROWS_C={chunk_rows}"],
     )
@@ -92,7 +92,7 @@ def xbf3_gemv_v3(wts: In, act: In, out: Out, *,
 
     ld = ExternalFunction(
         "xbf3_load_act",
-        source_file="xbf3_gemv.cc",
+        source_file="xbf3_v3_load.cc",
         arg_types=[chunk_wts_ty, chunk_wts_ty],
         compile_flags=["-O2", f"-DCHUNK_ROWS_C={chunk_rows}"],
     )
