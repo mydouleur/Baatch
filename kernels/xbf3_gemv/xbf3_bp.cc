@@ -90,7 +90,7 @@ void xbf3_discard_chunk4(const uint8_t* __restrict w, float* __restrict y) {
   y[0] = (float)w[0];
 }
 
-// 调试 v2：y = [p0(16f) | p1(16f) | p2(16f) | e8(k=0)(32f) | e8(k=1)(32f) | scale(1f)]
+// 调试 v3：y[i*16+j] = 相位 i 的 lane j（全部 8 相位 × 16 lane = 128 float）
 extern "C"
 void xbf3_debug4(const uint8_t* __restrict w, float* __restrict y) {
   const aie::vector<uint16_t, 16> m07 = aie::broadcast<uint16_t, 16>(0x0707);
@@ -99,11 +99,8 @@ void xbf3_debug4(const uint8_t* __restrict w, float* __restrict y) {
   aie::vector<int16_t, 16> p0 = *aie::cbegin_unaligned_vector<16>((const int16_t*)(rowp + 2));
   aie::vector<int16_t, 16> p1 = *aie::cbegin_unaligned_vector<16>((const int16_t*)(rowp + 34));
   aie::vector<int16_t, 16> p2 = *aie::cbegin_unaligned_vector<16>((const int16_t*)(rowp + 66));
-  aie::store_v(y + 0,  aie::to_float<float>(p0));
-  aie::store_v(y + 16, aie::to_float<float>(p1));
-  aie::store_v(y + 32, aie::to_float<float>(p2));
 #pragma unroll
-  for (int k = 0; k < 2; k++) {
+  for (int k = 0; k < 8; k++) {
     const aie::vector<int16_t, 16> mk = aie::broadcast<int16_t, 16>(g_bitmask_tab[k]);
     aie::vector<int16_t, 16> t0 = aie::bit_and(p0, mk);
     aie::vector<int16_t, 16> t1 = aie::bit_and(p1, mk);
@@ -116,9 +113,6 @@ void xbf3_debug4(const uint8_t* __restrict w, float* __restrict y) {
     aie::vector<int8_t, 32> e8 = aie::load_v<32>((const int8_t*)g_scratch16);
     e8 = aie::bit_xor(e8, m4) - m4;
     aie::vector<float, 32> qf = aie::to_float<float>(e8);
-    aie::store_v(y + 48 + k * 32, qf);
+    for (int j = 0; j < 16; j++) y[k * 16 + j] = qf[j];
   }
-  uint32_t sbits = (uint32_t)rowp[0] | ((uint32_t)rowp[1] << 8);
-  uint32_t fbits = sbits << 16;
-  __builtin_memcpy(&y[112], &fbits, 4);
 }
