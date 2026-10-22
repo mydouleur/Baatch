@@ -45,6 +45,7 @@ jobs:
             --aie-generate-xclbin --xclbin-name=xbf3_gemv.xclbin \
             --tmpdir=work --verbose 2>&1 | tail -30 || true
           cp work/insts.bin work/design.pdi build/ 2>/dev/null || true
+          cp design.pdi build/ 2>/dev/null || true   # bootgen 写在 cwd
           echo "=== work/ ==="; ls -la work/
           echo "=== build/ ==="; ls -la build/
 
