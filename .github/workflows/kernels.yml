@@ -17,14 +17,16 @@ jobs:
 
       - name: Install mlir-aie toolchain
         run: |
-          pip install mlir-aie --extra-index-url https://xilinx.github.io/_mlir-aie/ || pip install mlir-aie
-          python -c "import aie; print('mlir-aie OK')" || true
+          python3 -m pip install --upgrade pip
+          pip install mlir_aie -f https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4
+          pip install -r <(echo "ml_dtypes") 2>/dev/null || true
+          python3 -c "from aie.iron import Kernel; print('IRON OK')"
 
       - name: Smoke build (passthrough example)
         run: |
           echo "TODO: 第一个自研 kernel (kernels/xbf3_gemv) 落地后替换为正式构建"
           echo "当前仅验证工具链可用性"
-          aiecc.py --help > /dev/null 2>&1 && echo "aiecc OK" || which aie-opt aie-translate || true
+          || which aie-opt aie-translate || true
 
       - name: Upload artifacts
         if: always()
