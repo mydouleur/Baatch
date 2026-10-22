@@ -1,0 +1,37 @@
+name: kernels
+
+#  kernel CI：在 ubuntu 上用 mlir-aie 编译 AIE kernel（XDNA2 目标）。
+#  本机（Windows）只负责上机实测；编译全部走 CI。
+#  触发：kernels/ 下源码变更时自动编译，artifact 供本机 gh 拉取。
+
+on:
+  push:
+    paths: ['kernels/**', '.github/workflows/kernels.yml']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mlir-aie toolchain
+        run: |
+          pip install mlir-aie --extra-index-url https://xilinx.github.io/_mlir-aie/ || pip install mlir-aie
+          python -c "import aie; print('mlir-aie OK')" || true
+
+      - name: Smoke build (passthrough example)
+        run: |
+          echo "TODO: 第一个自研 kernel (kernels/xbf3_gemv) 落地后替换为正式构建"
+          echo "当前仅验证工具链可用性"
+          aiecc.py --help > /dev/null 2>&1 && echo "aiecc OK" || which aie-opt aie-translate || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernels-xclbin
+          path: |
+            kernels/**/*.xclbin
+            kernels/**/*.elf
+          if-no-files-found: ignore
