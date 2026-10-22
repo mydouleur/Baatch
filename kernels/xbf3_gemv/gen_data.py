@@ -37,6 +37,8 @@ def main():
                     help="v4: XBF3-BP 位平面打包 + fp32 相位平面激活")
     ap.add_argument("--split", action="store_true",
                     help="v5: 双通道——wtsA.bin=[act块][偶数专家], wtsB.bin=[奇数专家]")
+    ap.add_argument("--bps6", action="store_true",
+                    help="v6: xp 用 lo/hi 拆分布局（hi 预除 256）")
     ap.add_argument("--l2rows", type=int, default=512, help="L2 块行数（v5 memtile 容量限 256）")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -63,11 +65,22 @@ def main():
     if a.experts > 1:
         wts = np.tile(wts, a.experts)        # E * OUT * 196
     xp = None
+    if a.bps6:
+        a.bitplane = True
     if a.bitplane:
-        xp = np.zeros((8, IN // SB, 32), dtype=np.float32)
-        for k in range(8):
-            for sb in range(IN // SB):
-                xp[k, sb, :] = x[sb * SB + 8 * np.arange(32) + k]
+        if a.bps6:
+            xp_lo = np.zeros((8, IN // SB, 16), dtype=np.float32)
+            xp_hi = np.zeros((8, IN // SB, 16), dtype=np.float32)
+            for k in range(8):
+                for sb in range(IN // SB):
+                    xp_lo[k, sb, :] = x[sb * SB + 8 * (2 * np.arange(16)) + k]
+                    xp_hi[k, sb, :] = x[sb * SB + 8 * (2 * np.arange(16) + 1) + k] / 256.0
+            xp = np.concatenate([xp_lo.reshape(-1), xp_hi.reshape(-1)])  # [lo 256][hi 256]
+        else:
+            xp = np.zeros((8, IN // SB, 32), dtype=np.float32)
+            for k in range(8):
+                for sb in range(IN // SB):
+                    xp[k, sb, :] = x[sb * SB + 8 * np.arange(32) + k]
     # act 块内容（v3/v5 共用）：bp 时是 xp 相位平面，否则原始 x
     act_content = (xp.reshape(-1) if a.bitplane else x)
     chunk_bytes = a.l2rows * ROW_B   # = L2 块（act 独占一个 L2 块）
