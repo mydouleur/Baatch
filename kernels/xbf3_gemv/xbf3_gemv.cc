@@ -15,7 +15,11 @@
 #define XBF3_SB 256
 #define XBF3_ROW_SBS (XBF3_IN / XBF3_SB)   // 2
 #define XBF3_SB_BYTES (2 + XBF3_SB * 3 / 8) // 98
+#ifdef CHUNK_ROWS_C
+#define CHUNK_ROWS CHUNK_ROWS_C
+#else
 #define CHUNK_ROWS 16
+#endif
 
 extern "C"
 void xbf3_gemv_chunk(const uint8_t* __restrict w, const float* __restrict x,
