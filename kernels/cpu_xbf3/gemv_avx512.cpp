@@ -39,25 +39,35 @@ static const __m512i VPERMB_IDX = [] {
   return _mm512_load_si512(idx);
 }();
 
+// 文件级常量（防逐调用重载）
+static const __m512 LUT_Q = _mm512_setr_ps(0.f, 1.f, 2.f, 3.f, -4.f, -3.f, -2.f, -1.f,
+                                           0, 0, 0, 0, 0, 0, 0, 0);
+static const __m512i SEVEN = _mm512_set1_epi32(7);
 static inline float bf16_to_f32(uint16_t b) { uint32_t u = (uint32_t)b << 16; float f; memcpy(&f, &u, 4); return f; }
 
 void gemv_lut_sb(const uint8_t* wsb, float scale, const float* xp_lut_sb,
+                 int sb_stride_k,  // = sb_per_row * 32
                  __m512& acc0, __m512& acc1) {
-  // xp_lut_sb: [k][2 blocks][16 lanes] = 128 floats per sb
-  const __m512 lut = _mm512_setr_ps(0.f, 1.f, 2.f, 3.f, -4.f, -3.f, -2.f, -1.f,
-                                    0, 0, 0, 0, 0, 0, 0, 0);
-  const __m512i seven = _mm512_set1_epi32(7);
+  // xp 布局 [k][sb][blk][16]；xp_lut_sb = XP + sb*32
+  const __m512 lut = LUT_Q;
+  const __m512i seven = SEVEN;
   for (int b = 0; b < 2; b++) {
     __m512i z = _mm512_maskz_loadu_epi8(0x0000FFFFFFFFFFFFULL, wsb + 2 + 48 * b);
     __m512i g = _mm512_permutexvar_epi8(VPERMB_IDX, z);
     __m512& acc = b ? acc1 : acc0;
+    // 双 acc 显式破 fmadd 链（偶/奇相位各一条）
+    __m512 accE = _mm512_setzero_ps(), accO = _mm512_setzero_ps();
     #pragma unroll
-    for (int k = 0; k < 8; k++) {
-      __m512i v = _mm512_and_si512(_mm512_srli_epi32(g, 3 * k), seven);
-      __m512 qf = _mm512_permutexvar_ps(v, lut);
-      __m512 xv = _mm512_load_ps(xp_lut_sb + (k * 2 + b) * 16);
-      acc = _mm512_fmadd_ps(qf, xv, acc);
+    for (int k = 0; k < 8; k += 2) {
+      __m512i vE = _mm512_and_si512(_mm512_srli_epi32(g, 3 * k), seven);
+      __m512i vO = _mm512_and_si512(_mm512_srli_epi32(g, 3 * (k + 1)), seven);
+      __m512 qE = _mm512_permutexvar_ps(vE, lut);
+      __m512 qO = _mm512_permutexvar_ps(vO, lut);
+      const float* xb = xp_lut_sb + k * sb_stride_k + b * 16;
+      accE = _mm512_fmadd_ps(qE, _mm512_load_ps(xb), accE);
+      accO = _mm512_fmadd_ps(qO, _mm512_load_ps(xb + sb_stride_k), accO);
     }
+    acc = _mm512_add_ps(_mm512_add_ps(acc, accE), accO);
   }
 }
 
@@ -65,6 +75,8 @@ void gemv_lut_sb(const uint8_t* wsb, float scale, const float* xp_lut_sb,
 // 每 sb: [2B scale][P0 32B][P1][P2]；plane p byte b bit k = value[8b+k] 的 bit p
 // y += Σ_p Σ_k maskadd(xp_bp[p][k][sb][lane], bit 已置)
 void gemv_bp_sb(const uint8_t* wsb, float scale, const float* xp_bp_sb,
+                int sb_stride_p,  // = 8 * sb_per_row * 32（p 的步长）
+                int k_stride,     // = sb_per_row * 32
                 __m512& acc_lo, __m512& acc_hi) {
   // xp_bp_sb: [p][k][32 floats] — 96 floats per (p,k)... 布局: [p][k][2 个 zmm]
   const uint8_t* P0 = wsb + 2;
@@ -79,9 +91,9 @@ void gemv_bp_sb(const uint8_t* wsb, float scale, const float* xp_bp_sb,
     __mmask32 m0 = _mm256_test_epi8_mask(_mm256_and_si256(p0, mk), _mm256_and_si256(p0, mk));
     __mmask32 m1 = _mm256_test_epi8_mask(_mm256_and_si256(p1, mk), _mm256_and_si256(p1, mk));
     __mmask32 m2 = _mm256_test_epi8_mask(_mm256_and_si256(p2, mk), _mm256_and_si256(p2, mk));
-    const float* x0 = xp_bp_sb + k * 64;                    // p0
-    const float* x1 = xp_bp_sb + 8 * 64 + k * 64;           // p1
-    const float* x2 = xp_bp_sb + 16 * 64 + k * 64;          // p2
+    const float* x0 = xp_bp_sb + k * k_stride;                    // p0
+    const float* x1 = xp_bp_sb + 1 * sb_stride_p + k * k_stride;  // p1
+    const float* x2 = xp_bp_sb + 2 * sb_stride_p + k * k_stride;  // p2
     acc_lo = _mm512_mask_add_ps(acc_lo, (__mmask16)(m0 & 0xFFFF), acc_lo, _mm512_loadu_ps(x0));
     acc_hi = _mm512_mask_add_ps(acc_hi, (__mmask16)(m0 >> 16),  acc_hi, _mm512_loadu_ps(x0 + 16));
     acc_lo = _mm512_mask_add_ps(acc_lo, (__mmask16)(m1 & 0xFFFF), acc_lo, _mm512_loadu_ps(x1));
@@ -92,6 +104,47 @@ void gemv_bp_sb(const uint8_t* wsb, float scale, const float* xp_bp_sb,
 }
 
 // ---------------- GEMV 主体（行循环） ----------------
+// LUT 变体：双行交错（ILP 隐藏 extract→cvt→mac 链延迟）
+void gemv_rows_lut2(const uint8_t* w, int row0, int nrows, int n_in,
+                    const float* xp, float* y) {
+  const int sb_per_row = n_in / SB;
+  for (int r = 0; r + 1 < nrows; r += 2) {
+    const uint8_t* rowp0 = w + (size_t)(row0 + r) * sb_per_row * ROW_BYTES;
+    const uint8_t* rowp1 = rowp0 + sb_per_row * ROW_BYTES;
+    __m512 A0 = _mm512_setzero_ps(), A1 = _mm512_setzero_ps();
+    __m512 B0 = _mm512_setzero_ps(), B1 = _mm512_setzero_ps();
+    for (int sb = 0; sb < sb_per_row; sb++) {
+      const uint8_t* wsb0 = rowp0 + sb * ROW_BYTES;
+      const uint8_t* wsb1 = rowp1 + sb * ROW_BYTES;
+      __m512 sA0 = _mm512_setzero_ps(), sA1 = _mm512_setzero_ps();
+      __m512 sB0 = _mm512_setzero_ps(), sB1 = _mm512_setzero_ps();
+      gemv_lut_sb(wsb0, 0.f, xp + sb * 32, sb_per_row * 32, sA0, sA1);
+      gemv_lut_sb(wsb1, 0.f, xp + sb * 32, sb_per_row * 32, sB0, sB1);
+      float scA = bf16_to_f32(wsb0[0] | (wsb0[1] << 8));
+      float scB = bf16_to_f32(wsb1[0] | (wsb1[1] << 8));
+      A0 = _mm512_fmadd_ps(sA0, _mm512_set1_ps(scA), A0);
+      A1 = _mm512_fmadd_ps(sA1, _mm512_set1_ps(scA), A1);
+      B0 = _mm512_fmadd_ps(sB0, _mm512_set1_ps(scB), B0);
+      B1 = _mm512_fmadd_ps(sB1, _mm512_set1_ps(scB), B1);
+    }
+    y[row0 + r] = _mm512_reduce_add_ps(_mm512_add_ps(A0, A1));
+    y[row0 + r + 1] = _mm512_reduce_add_ps(_mm512_add_ps(B0, B1));
+  }
+  // 尾行
+  if (nrows & 1) {
+    __m512 A0 = _mm512_setzero_ps(), A1 = _mm512_setzero_ps();
+    for (int sb = 0; sb < sb_per_row; sb++) {
+      const uint8_t* wsb = w + (size_t)(row0 + nrows - 1) * sb_per_row * ROW_BYTES + sb * ROW_BYTES;
+      __m512 s0 = _mm512_setzero_ps(), s1 = _mm512_setzero_ps();
+      gemv_lut_sb(wsb, 0.f, xp + sb * 32, sb_per_row * 32, s0, s1);
+      float sc = bf16_to_f32(wsb[0] | (wsb[1] << 8));
+      A0 = _mm512_fmadd_ps(s0, _mm512_set1_ps(sc), A0);
+      A1 = _mm512_fmadd_ps(s1, _mm512_set1_ps(sc), A1);
+    }
+    y[row0 + nrows - 1] = _mm512_reduce_add_ps(_mm512_add_ps(A0, A1));
+  }
+}
+
 template <int VARIANT>
 void gemv_rows(const uint8_t* w, int row0, int nrows, int n_in,
                const float* xp, float* y) {
@@ -103,8 +156,8 @@ void gemv_rows(const uint8_t* w, int row0, int nrows, int n_in,
       const uint8_t* wsb = rowp + sb * ROW_BYTES;
       float scale = bf16_to_f32(wsb[0] | (wsb[1] << 8));
       __m512 sb0 = _mm512_setzero_ps(), sb1 = _mm512_setzero_ps();
-      if (VARIANT == 0) gemv_lut_sb(wsb, scale, xp + sb * 256, sb0, sb1);
-      else              gemv_bp_sb(wsb, scale, xp + sb * 1536 / 2, sb0, sb1);
+      if (VARIANT == 0) gemv_lut_sb(wsb, scale, xp + sb * 32, sb_per_row * 32, sb0, sb1);
+      else              gemv_bp_sb(wsb, scale, xp + sb * 32, 8 * sb_per_row * 32, sb_per_row * 32, sb0, sb1);
       __m512 sc = _mm512_set1_ps(scale);
       acc0 = _mm512_fmadd_ps(sb0, sc, acc0);
       acc1 = _mm512_fmadd_ps(sb1, sc, acc1);
@@ -117,6 +170,7 @@ void gemv_rows(const uint8_t* w, int row0, int nrows, int n_in,
 struct Args {
   std::string variant = "lut";
   std::string dir = "data_cpu";
+  int lp = -1;
   int threads = 1;
   int iters = 20;
   int experts = 64;
@@ -135,6 +189,7 @@ int main(int argc, char** argv) {
     else if (s == "--dir") a.dir = argv[++i];
     else if (s == "--experts") a.experts = atoi(argv[++i]);
     else if (s == "--verify-only") a.verify_only = true;
+    else if (s == "--lp") a.lp = atoi(argv[++i]);
   }
   int E = a.experts, NIN = a.n_in, NOUT = a.n_out;
   auto wts = read_file(a.dir + (a.variant == "lut" ? "\\wts_lut.bin" : "\\wts_bp.bin"));
@@ -150,7 +205,7 @@ int main(int argc, char** argv) {
   auto run_slice = [&](int e0, int e1, float* yout) {
     for (int e = e0; e < e1; e++)
       if (a.variant == "lut")
-        gemv_rows<0>(W + e * w_per_exp, 0, NOUT, NIN, XP, yout + e * NOUT);
+        gemv_rows_lut2(W + e * w_per_exp, 0, NOUT, NIN, XP, yout + e * NOUT);
       else
         gemv_rows<1>(W + e * w_per_exp, 0, NOUT, NIN, XP, yout + e * NOUT);
   };
@@ -180,7 +235,8 @@ int main(int argc, char** argv) {
     ths.emplace_back([&, t] {
 #ifdef _WIN32
       // 绑核：偶数逻辑核（SMT 第一线程）——Zen5 大核优先（见 README 注记）
-      SetThreadAffinityMask(GetCurrentThread(), 1ull << (2 * t));
+      int lp = (a.lp >= 0) ? a.lp : 2 * t;
+      SetThreadAffinityMask(GetCurrentThread(), 1ull << lp);
 #endif
       int per = E / a.threads;
       int e0 = t * per, e1 = (t == a.threads - 1) ? E : e0 + per;

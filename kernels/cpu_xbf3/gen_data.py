@@ -79,8 +79,9 @@ def main():
                 xp_bp[p, k, sb, :] = x[sb * SB + 8 * np.arange(32) + k] * pw[p]
     xp_bp.tofile(os.path.join(a.out, "xp_bp.bin"))
 
-    # 参考：fp64，每专家独立
-    w_dq = (q.reshape(E, OUT, IN // SB, SB).astype(np.float32) * s[..., None]).reshape(E, OUT, IN)
+    # 参考：fp64，每专家独立；scale 用 bf16 舍入值（与 kernel 消费的一致）
+    s_kernel = (s_bf.astype(np.uint32) << 16).view(np.float32)
+    w_dq = (q.reshape(E, OUT, IN // SB, SB).astype(np.float32) * s_kernel[..., None]).reshape(E, OUT, IN)
     y = w_dq.astype(np.float64) @ x.astype(np.float64)
     y.astype(np.float32).tofile(os.path.join(a.out, "y_ref.bin"))
     print(f"E={E} OUT={OUT} IN={IN} -> {a.out}/  wts_lut={os.path.getsize(os.path.join(a.out,'wts_lut.bin'))}B")
