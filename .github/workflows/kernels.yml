@@ -1,7 +1,7 @@
 name: kernels
 
 #  kernel CI：在 ubuntu 上用 mlir-aie 编译 AIE kernel（XDNA2 目标）。
-#  本机（Windows）只负责上机实测；编译全部走 CI。
+#  本机（Windows）负责 xclbin 组装（xclbinutil，免装 XRT）+ 上机实测。
 #  触发：kernels/ 下源码变更时自动编译，artifact 供本机 gh 拉取。
 
 on:
@@ -21,27 +21,32 @@ jobs:
           pip install mlir_aie -f https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4
           pip install llvm-aie -f https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
           python3 -c "from aie.iron import Kernel; print('IRON OK')"
-          # Peano (llvm-aie) 安装位置探测：mlir-aie 的 peano_install_dir 只认
-          # $PEANO_INSTALL_DIR 或 platlib/llvm-aie，wheel 实际布局可能不同
+          # mlir_aie wheel 不含 Peano；llvm-aie wheel 装在 platlib/llvm-aie
           LOC=$(pip show llvm-aie | awk '/^Location:/{print $2}')
-          CLANG=$(find "$LOC" -maxdepth 4 -name "clang++" | head -1)
-          echo "clang++ found at: $CLANG"
-          PEANO_DIR=$(dirname "$(dirname "$CLANG")")
-          echo "PEANO_INSTALL_DIR=$PEANO_DIR" >> $GITHUB_ENV
-          echo "peano dir: $PEANO_DIR"
+          echo "PEANO_INSTALL_DIR=$LOC/llvm-aie" >> $GITHUB_ENV
+          ls "$LOC/llvm-aie/bin" | head
 
-      - name: Inventory bundled tools
+      - name: Build xbf3_gemv (emit MLIR + peano + aiecc, no xclbinutil)
         run: |
-          BIN=$(python3 -c "from aie.tools import MLIR_AIE_BIN_DIR as b; print(b)")
-          echo "mlir_aie bin: $BIN"; ls "$BIN"
-          which xclbinutil bootgen aiebu-asm || true
-
-      - name: Build xbf3_gemv (compile-only, npu2)
-        run: |
+          set -x
           cd kernels/xbf3_gemv
-          python3 xbf3_gemv.py --xclbin-path build/xbf3_gemv.xclbin --insts-path build/insts.bin 2>&1 | tail -20 || true
-          python3 xbf3_gemv.py --full-elf-path build/xbf3_gemv_full.elf 2>&1 | tail -20 || true
-          find . -name "*.xclbin" -o -name "*.elf" -o -name "insts.bin" | head
+          mkdir -p build work
+          # 1) design MLIR
+          python3 xbf3_gemv.py --emit-mlir > work/aie.mlir
+          # 2) core kernel .o (Peano, aie2p)
+          "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 \
+            -c xbf3_gemv.cc -o work/xbf3_gemv_chunk.o
+          # 3) aiecc: insts + PDI + metadata jsons（xclbin 组装留给本机 xclbinutil）
+          AIECC=$(python3 -c "from aie.tools import MLIR_AIE_BIN_DIR as b; print(b)")/aiecc
+          "$AIECC" --no-compile-host --no-xchesscc --no-xbridge --peano="$PEANO_INSTALL_DIR" \
+            work/aie.mlir \
+            --aie-generate-npu-insts --npu-insts-name=insts.bin \
+            --aie-generate-pdi --pdi-name=design.pdi \
+            --aie-generate-xclbin --xclbin-name=xbf3_gemv.xclbin \
+            --tmpdir=work --verbose 2>&1 | tail -30 || true
+          cp work/insts.bin work/design.pdi build/ 2>/dev/null || true
+          echo "=== work/ ==="; ls -la work/
+          echo "=== build/ ==="; ls -la build/
 
       - name: Upload artifacts
         if: always()
@@ -49,8 +54,6 @@ jobs:
         with:
           name: kernels-xclbin
           path: |
-            kernels/**/*.xclbin
-            kernels/**/*.bin
-            kernels/**/*.elf
-            kernels/**/build/**
+            kernels/xbf3_gemv/build/**
+            kernels/xbf3_gemv/work/**
           if-no-files-found: ignore
