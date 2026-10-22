@@ -102,22 +102,35 @@ void vecmat_vectorized(T_in_A *__restrict a, T_in_B *__restrict b,
       T_in_A *__restrict a_ptr = a + kh * k_half;
       T_in_A *__restrict b_ptr = b_buf + col * s;
 
-      // Peano 移植：弃用 aie::accumulate 变长形（实测 ±5/±7 值在 k%16==13 处错——
-      // 疑似 Peano 对 8-vector accumulate 的错误 lowering）。逐行 broadcast×mac。
-      for (int row = 0; row < k_half; row++) {
-        // b 行 = 64 输出车道：tile(row/8, j) 的第 row%8 行，j=0..7 拼接
-        const int ti = (row >> 3) * (colB * size_B);  // tile 行组基址
-        const int to = (row & 7) * half_r;            // tile 内行偏移
-        const aie::vector<T_in_A, four_r> b_row = aie::concat(
-            aie::load_v<half_r>(b_ptr + ti + 0 * size_B + to),
-            aie::load_v<half_r>(b_ptr + ti + 1 * size_B + to),
-            aie::load_v<half_r>(b_ptr + ti + 2 * size_B + to),
-            aie::load_v<half_r>(b_ptr + ti + 3 * size_B + to),
-            aie::load_v<half_r>(b_ptr + ti + 4 * size_B + to),
-            aie::load_v<half_r>(b_ptr + ti + 5 * size_B + to),
-            aie::load_v<half_r>(b_ptr + ti + 6 * size_B + to),
-            aie::load_v<half_r>(b_ptr + ti + 7 * size_B + to));
-        c_acc = aie::mac(c_acc, aie::broadcast<T_in_A, four_r>(a_ptr[row]), b_row);
+      // TileFuse 原版 accumulate 形（1.3.4 wheel 的 aie_api 在 aie2p 上对 ±5/±7
+      // 有错——疑似旧版 unpack/accumulate lowering；CI 升级 1.4.4 后复测）
+      for (int row = 0; row < k_half; row += s) {
+        const aie::vector<T_in_A, s> a_vec = aie::load_v<s>(a_ptr);
+
+#define BVEC(t) aie::concat(aie::load_v<half_r>(b_ptr + 0 * s * half_r + t * half_r), \
+                            aie::load_v<half_r>(b_ptr + 1 * s * half_r + t * half_r), \
+                            aie::load_v<half_r>(b_ptr + 2 * s * half_r + t * half_r), \
+                            aie::load_v<half_r>(b_ptr + 3 * s * half_r + t * half_r), \
+                            aie::load_v<half_r>(b_ptr + 4 * s * half_r + t * half_r), \
+                            aie::load_v<half_r>(b_ptr + 5 * s * half_r + t * half_r), \
+                            aie::load_v<half_r>(b_ptr + 6 * s * half_r + t * half_r), \
+                            aie::load_v<half_r>(b_ptr + 7 * s * half_r + t * half_r))
+        const aie::vector<T_in_A, four_r> b_vec_0 = BVEC(0);
+        const aie::vector<T_in_A, four_r> b_vec_1 = BVEC(1);
+        const aie::vector<T_in_A, four_r> b_vec_2 = BVEC(2);
+        const aie::vector<T_in_A, four_r> b_vec_3 = BVEC(3);
+        const aie::vector<T_in_A, four_r> b_vec_4 = BVEC(4);
+        const aie::vector<T_in_A, four_r> b_vec_5 = BVEC(5);
+        const aie::vector<T_in_A, four_r> b_vec_6 = BVEC(6);
+        const aie::vector<T_in_A, four_r> b_vec_7 = BVEC(7);
+#undef BVEC
+
+        c_acc = aie::accumulate<four_r>(
+          c_acc, a_vec, 0, b_vec_0, b_vec_1, b_vec_2, b_vec_3,
+          b_vec_4, b_vec_5, b_vec_6, b_vec_7);
+
+        b_ptr += n * s;
+        a_ptr += s;
       }
 
       aie::store_v(c_ptr, c_acc.template to_vector<T_out>());

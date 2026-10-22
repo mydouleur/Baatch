@@ -29,6 +29,8 @@ def main():
     ap.add_argument("--out", default="data_w4")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--size", type=int, default=4096, help="K=N（须与设计编译尺寸一致）")
+    ap.add_argument("--pattern", default=None,
+                    help="w1：A=1,W=1,S=1,Z=0 → C=K；w1z8：W=1,Z=8,S=1 → C=-7K（zp 隔离）")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     K = N = a.size
@@ -44,6 +46,40 @@ def main():
     S_bf = f32_to_bf16_u16(S)
     S_f = bf16_u16_to_f32(S_bf)
     Z = rng.integers(0, 16, size=(ng, N), dtype=np.uint8)         # zero point
+
+    if a.pattern and a.pattern.startswith("apulse"):
+        # apulse:k0 — A 仅 k0 为 1（δ 脉冲），W=1,Z=8,S=1 → 期望 y=-7
+        k0 = int(a.pattern.split(":")[1])
+        A = np.zeros(K, dtype=np.float32); A[k0] = 1
+        A_bf = f32_to_bf16_u16(A); A_f = A.astype(np.float64)
+        W = np.ones((K, N), dtype=np.uint8)
+        S = np.ones((ng, N), dtype=np.float32); S_bf = f32_to_bf16_u16(S); S_f = S
+        Z = np.full((ng, N), 8, dtype=np.uint8)
+    elif a.pattern and a.pattern.startswith("akt"):
+        # akt:t — A 仅第 t 个 128 瓦片为 1，W=1,Z=8,S=1（定位错误的 k 瓦片）
+        t = int(a.pattern.split(":")[1])
+        A = np.zeros(K, dtype=np.float32); A[128*t:128*(t+1)] = 1
+        A_bf = f32_to_bf16_u16(A); A_f = A.astype(np.float64)
+        W = np.ones((K, N), dtype=np.uint8)
+        S = np.ones((ng, N), dtype=np.float32); S_bf = f32_to_bf16_u16(S); S_f = S
+        Z = np.full((ng, N), 8, dtype=np.uint8)
+    elif a.pattern and a.pattern.startswith("const"):
+        # const:w,z — 常数权重/零点和 A=1,S=1（结构性 bug 隔离）
+        wv, zv = (int(x) for x in a.pattern.split(":")[1].split(","))
+        A = np.ones(K, dtype=np.float32); A_bf = f32_to_bf16_u16(A); A_f = A.astype(np.float64)
+        W = np.full((K, N), wv, dtype=np.uint8)
+        S = np.ones((ng, N), dtype=np.float32); S_bf = f32_to_bf16_u16(S); S_f = S
+        Z = np.full((ng, N), zv, dtype=np.uint8)
+    elif a.pattern == "w1":
+        A = np.ones(K, dtype=np.float32); A_bf = f32_to_bf16_u16(A); A_f = A.astype(np.float64)
+        W = np.ones((K, N), dtype=np.uint8)
+        S = np.ones((ng, N), dtype=np.float32); S_bf = f32_to_bf16_u16(S); S_f = S
+        Z = np.zeros((ng, N), dtype=np.uint8)
+    elif a.pattern == "w1z8":
+        A = np.ones(K, dtype=np.float32); A_bf = f32_to_bf16_u16(A); A_f = A.astype(np.float64)
+        W = np.ones((K, N), dtype=np.uint8)
+        S = np.ones((ng, N), dtype=np.float32); S_bf = f32_to_bf16_u16(S); S_f = S
+        Z = np.full((ng, N), 8, dtype=np.uint8)
 
     # ---- 参考：C = A @ dequant(B)，fp64 ----
     Wdeq = ((W.astype(np.int16) - np.repeat(Z, GS, axis=0).astype(np.int16))

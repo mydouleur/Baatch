@@ -78,13 +78,17 @@ def my_matmul(dev, N, K):
             # AIE Core Function declarations
             func_type = "vectorized" if vectorized else "scalar"
 
+            # link_with 位置随 mlir_aie 版本变化：1.3.4 在 external_func 上，main/1.4.x 在 core 上
+            import inspect as _inspect
+            _LINK_ON_FUNC = "link_with" in _inspect.signature(external_func.__init__).parameters
+            _lk = f"vm_{n}x{k}.o"
             zero = external_func(f"zero_{func_type}_{dtype_out_str}", inputs=[outC_ty],
-                                 link_with=f"vm_{n}x{k}.o")
+                                 **({"link_with": _lk} if _LINK_ON_FUNC else {}))
             # For GEVM with mixed precision: vector A (bf16), matrix B (int8), output C (bf16)
             vecmat = external_func(
                 f"vecmat_{func_type}_{dtype_in_str}_{dtype_out_str}",
                 inputs=[inA_ty, B_ty, outC_ty],
-                link_with=f"vm_{n}x{k}.o",
+                **({"link_with": _lk} if _LINK_ON_FUNC else {}),
             )
 
             # Tile declarations
@@ -186,7 +190,7 @@ def my_matmul(dev, N, K):
             for row in range(n_rows):
                 for col in range(n_cols):
                 # Compute tile col
-                    @core(cores[row][col])
+                    @core(cores[row][col], **({} if _LINK_ON_FUNC else {"link_with": f"vm_{n}x{k}.o"}))
                     def core_body():
                         for _ in range_(0xFFFFFFFF):
                             elem_out = outC_fifos[row][col].acquire(
