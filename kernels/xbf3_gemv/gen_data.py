@@ -33,6 +33,8 @@ def main():
                     help="replicate weight matrix E times (v2 bandwidth runs)")
     ap.add_argument("--cols", type=int, default=1,
                     help="v3: split rows across N columns, wts laid out column-major")
+    ap.add_argument("--bitplane", action="store_true",
+                    help="v4: XBF3-BP 位平面打包 + fp32 相位平面激活")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
@@ -46,7 +48,10 @@ def main():
 
     # pack: per row, per superblock: [2B bf16 scale][96B packed]
     s_bf = f32_to_bf16_bytes(s)                      # (OUT, 2) uint16
-    packed = xbf3.pack3(q).reshape(OUT, IN // SB, 96)  # uint8
+    if a.bitplane:
+        packed = xbf3.pack3_bp(q).reshape(OUT, IN // SB, 96)
+    else:
+        packed = xbf3.pack3(q).reshape(OUT, IN // SB, 96)  # uint8
     row = np.empty((OUT, IN // SB, SB_BYTES), dtype=np.uint8)
     row[:, :, 0] = (s_bf & 0xFF).astype(np.uint8)
     row[:, :, 1] = (s_bf >> 8).astype(np.uint8)
@@ -68,7 +73,15 @@ def main():
             for c in range(a.cols))
         wts = np.frombuffer(slabs, dtype=np.uint8).copy()
     wts.tofile(os.path.join(a.out, "wts.bin"))
-    xa = np.tile(x, a.cols) if a.cols > 1 else x
+    if a.bitplane:
+        # xp[k][sb][i] = x[sb*256 + 8i + k]，fp32，8*2*32 = 512 floats
+        xp = np.zeros((8, IN // SB, 32), dtype=np.float32)
+        for k in range(8):
+            for sb in range(IN // SB):
+                xp[k, sb, :] = x[sb * SB + 8 * np.arange(32) + k]
+        xa = np.tile(xp.reshape(-1), a.cols) if a.cols > 1 else xp.reshape(-1)
+    else:
+        xa = np.tile(x, a.cols) if a.cols > 1 else x
     xa.tofile(os.path.join(a.out, "act.bin"))
 
     # reference: dequant with the SAME bf16-rounded scales the kernel consumes

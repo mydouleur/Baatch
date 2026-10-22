@@ -216,3 +216,45 @@ def self_test():
 
 if __name__ == "__main__":
     self_test()
+
+
+# ---------------------------------------------------------------- tile-friendly bit-plane variant (M2'-3)
+# Same 3.0 bpw density, lane-friendly for AIE2P v32int8 extract:
+# per superblock (256 values): 96B = plane0(32B) | plane1(32B) | plane2(32B)
+# plane p, byte b, bit k  <->  value[8b+k] bit p  (value in [0,8), i.e. q & 7)
+
+def pack3_bp(q):
+    """Bit-plane pack int8 codes along last axis. (..., 256) -> (..., 96) uint8."""
+    assert q.shape[-1] % 256 == 0
+    u = (q.astype(np.int16) & 0x7).astype(np.uint8)
+    shp0 = u.shape
+    u = u.reshape(shp0[:-1] + (-1, 32, 8))          # (..., nsb, 32, 8)
+    nsb = u.shape[-3]
+    planes = []
+    for p in range(3):
+        bits = (u >> p) & 1
+        planes.append(np.packbits(bits, axis=-1, bitorder="little").squeeze(-1))
+    out = np.stack(planes, axis=-2)                 # (..., nsb, 3, 32)
+    return out.reshape(shp0[:-1] + (nsb * 96,))
+
+
+def unpack3_bp(packed, n_out):
+    """Inverse of pack3_bp."""
+    nsb = packed.shape[-1] // 96
+    v = packed.reshape(packed.shape[:-1] + (nsb, 3, 32))  # plane-major within sb
+    out = np.zeros(v.shape[:-3] + (nsb, 32, 8), dtype=np.uint8)
+    for p in range(3):
+        bits = np.unpackbits(v[..., p, :], axis=-1, bitorder="little")
+        out |= bits.reshape(out.shape).astype(np.uint8) << p
+    out = out.reshape(out.shape[:-3] + (nsb * 256,))[..., :n_out].astype(np.int8)
+    return np.where(out >= 4, out - 8, out).astype(np.int8)
+
+
+def _self_test_bp():
+    rng = np.random.default_rng(1)
+    q = rng.integers(-4, 4, size=(4, 512)).astype(np.int8)
+    p = pack3_bp(q)
+    assert p.shape == (4, 192), p.shape
+    q2 = unpack3_bp(p, 512)
+    assert np.array_equal(q, q2), "bp round-trip mismatch"
+    print("pack3_bp round-trip OK")

@@ -30,28 +30,30 @@ jobs:
           set -x
           cd kernels/xbf3_gemv
           AIECC=$(python3 -c "from aie.tools import MLIR_AIE_BIN_DIR as b; print(b)")/aiecc
+          AIE_INC=$(python3 -c "from aie.utils import config; print(config.cxx_header_path())")
+          ls "$AIE_INC" | head -3
+          BP_FLAGS="-std=c++20 -D__AIE_API_AIE_ADF_HPP__ -Wno-macro-redefined -Wno-unknown-attributes -I$AIE_INC"
+          compile_objs() {  # $1 = work dir
+            local w=$1
+            "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2               -c xbf3_gemv.cc -o $w/xbf3_gemv_chunk.o
+            "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2               -c xbf3_gemv.cc -o $w/xbf3_discard_chunk.o
+            "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2               -c xbf3_v3_gemv.cc -DCHUNK_ROWS_C=128 -o $w/xbf3_gemv_chunk3.o
+            "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2               -c xbf3_v3_gemv.cc -DCHUNK_ROWS_C=128 -o $w/xbf3_discard_chunk3.o
+            "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2               -c xbf3_v3_load.cc -DCHUNK_ROWS_C=128 -o $w/xbf3_load_act.o
+            "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 $BP_FLAGS               -c xbf3_bp.cc -DCHUNK_ROWS_C=128 -o $w/xbf3_gemv_chunk4.o
+            "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 $BP_FLAGS               -c xbf3_bp.cc -DCHUNK_ROWS_C=128 -o $w/xbf3_discard_chunk4.o
+            "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 $BP_FLAGS               -c xbf3_bp_load.cc -o $w/xbf3_load_act4.o
+          }
           build_one() {  # $1=design.py $2=tag; rest=extra design args
             local py=$1 tag=$2; shift 2
             mkdir -p build_$tag work_$tag
             python3 $py --emit-mlir "$@" > work_$tag/aie.mlir
-            "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 \
-              -c xbf3_gemv.cc -o work_$tag/xbf3_gemv_chunk.o
-            "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 \
-              -c xbf3_v3_gemv.cc -DCHUNK_ROWS_C=128 -o work_$tag/xbf3_gemv_chunk3.o
-            "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 \
-              -c xbf3_v3_gemv.cc -DCHUNK_ROWS_C=128 -o work_$tag/xbf3_discard_chunk3.o
-            "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 \
-              -c xbf3_v3_load.cc -DCHUNK_ROWS_C=128 -o work_$tag/xbf3_load_act.o
-            "$AIECC" --no-compile-host --no-xchesscc --no-xbridge --peano="$PEANO_INSTALL_DIR" \
-              work_$tag/aie.mlir \
-              --aie-generate-npu-insts --npu-insts-name=build_$tag/insts.bin \
-              --aie-generate-pdi --pdi-name=build_$tag/design.pdi \
-              --aie-generate-xclbin --xclbin-name=build_$tag/unused.xclbin \
-              --tmpdir=work_$tag --verbose 2>&1 | tail -80 || true
+            compile_objs work_$tag
+            "$AIECC" --no-compile-host --no-xchesscc --no-xbridge --peano="$PEANO_INSTALL_DIR"               work_$tag/aie.mlir               --aie-generate-npu-insts --npu-insts-name=build_$tag/insts.bin               --aie-generate-pdi --pdi-name=build_$tag/design.pdi               --aie-generate-xclbin --xclbin-name=build_$tag/unused.xclbin               --tmpdir=work_$tag --verbose 2>&1 | tail -80 || true
             ls -la build_$tag/
           }
-          build_one xbf3_gemv_v3.py v3_discard --core discard --experts 64 --ncols 4
-          build_one xbf3_gemv_v3.py v3_scalar --core scalar --experts 64 --ncols 4
+          build_one xbf3_gemv_v4.py v4_scalar --core scalar --experts 64 --ncols 4
+          build_one xbf3_gemv_v4.py v4_discard --core discard --experts 64 --ncols 4
           echo "=== done ==="
 
       - name: Upload artifacts
