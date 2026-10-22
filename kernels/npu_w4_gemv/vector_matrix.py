@@ -114,7 +114,7 @@ def my_matmul(dev, N, K):
                     f"inA{col}",
                     MemTiles[col],
                     [cores[j][col] for j in range(n_rows)],
-                    2,
+                    1,   # depth 1：DM 预算（与 outC 合计省 384B）
                     inA_ty,
                 )
                 
@@ -129,7 +129,7 @@ def my_matmul(dev, N, K):
                         f"outC{row}{col}", 
                         cores[row][col], 
                         MemTiles[col], 
-                        2, 
+                        1,   # depth 1：DM 预算（.bss 溢出 128B）
                         outC_ty,
                     )
                     
