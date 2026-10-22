@@ -85,7 +85,9 @@ jobs:
           pip install --upgrade --no-deps mlir_aie==1.4.4 -f https://github.com/Xilinx/mlir-aie/releases/expanded_assets/v1.4.4
           python3 -c "import aie; print('mlir_aie', getattr(aie, '__version__', 'n/a'))"
           cd kernels/npu_w4_gemv
-          AIECC=$(python3 -c "from aie.tools import MLIR_AIE_BIN_DIR as b; print(b)")/aiecc
+          # 1.4.4: bin/aiecc 是原生 C++ 工具（CLI 不同）；Python 流程在 bin/aiecc.py
+          AIECC=$(python3 -c "from aie.tools import MLIR_AIE_BIN_DIR as b; print(b)")/aiecc.py
+          [ -f "$AIECC" ] || AIECC=$(python3 -c "import aie.compiler.aiecc as m; print(m.__file__)")
           AIE_INC=$(python3 -c "from aie.utils import config; print(config.cxx_header_path())")
           mkdir -p work
           "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 -std=c++20             -D__AIE_API_AIE_ADF_HPP__ -Wno-macro-redefined -Wno-unknown-attributes -I"$AIE_INC"             -DDIM_N=64 -DDIM_K=128 -c vm_mix_int4_64x8.cc -o work/vm_64x128.o
