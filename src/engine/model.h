@@ -116,6 +116,8 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
     }
   };
   l2norm(q); l2norm(k);
+  { const float qs = 1.f / sqrtf((float)HD);   // llama delta-net: q 先乘 1/sqrt(S_k)
+    for (int i = 0; i < KEY_DIM; i++) q[i] *= qs; }
   // delta rule（v 头 j 用 k 头 j%16 —— qwen3.5 交错序）
   std::vector<float> o(VAL_DIM, 0.f);
   for (int j = 0; j < VH; j++) {

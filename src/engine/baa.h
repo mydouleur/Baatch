@@ -76,19 +76,19 @@ struct Baa {
   }
 
   const BaaTensor& at(const std::string& name) const {
-    // 二分（目录按 name 排序）
+    // 目录按规范化名排序（writer 保证）；保险起见二分失败时线性兜底
     size_t lo = 0, hi = names.size();
     while (lo < hi) {
       size_t mid = (lo + hi) / 2;
       if (names[mid] < name) lo = mid + 1; else hi = mid;
     }
-    if (lo >= names.size() || names[lo] != name)
-      throw std::runtime_error("tensor not found: " + name);
-    return tensors[lo];
+    if (lo < names.size() && names[lo] == name) return tensors[lo];
+    for (size_t i = 0; i < names.size(); i++)
+      if (names[i] == name) return tensors[i];
+    throw std::runtime_error("tensor not found: " + name);
   }
   bool has(const std::string& name) const {
-    size_t lo = 0, hi = names.size();
-    while (lo < hi) { size_t mid = (lo + hi) / 2; if (names[mid] < name) lo = mid + 1; else hi = mid; }
-    return lo < names.size() && names[lo] == name;
+    for (size_t i = 0; i < names.size(); i++) if (names[i] == name) return true;
+    return false;
   }
 };
