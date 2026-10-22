@@ -40,8 +40,9 @@ static const __m512i VPERMB_IDX = [] {
 }();
 
 // 文件级常量（防逐调用重载）
+// 16 项 = 8 项 × 2：permps 索引低 4 位含垃圾位，复制两份免 vpandd
 static const __m512 LUT_Q = _mm512_setr_ps(0.f, 1.f, 2.f, 3.f, -4.f, -3.f, -2.f, -1.f,
-                                           0, 0, 0, 0, 0, 0, 0, 0);
+                                           0.f, 1.f, 2.f, 3.f, -4.f, -3.f, -2.f, -1.f);
 static const __m512i SEVEN = _mm512_set1_epi32(7);
 static inline float bf16_to_f32(uint16_t b) { uint32_t u = (uint32_t)b << 16; float f; memcpy(&f, &u, 4); return f; }
 
@@ -59,10 +60,9 @@ void gemv_lut_sb(const uint8_t* wsb, float scale, const float* xp_lut_sb,
     __m512 accE = _mm512_setzero_ps(), accO = _mm512_setzero_ps();
     #pragma unroll
     for (int k = 0; k < 8; k += 2) {
-      __m512i vE = _mm512_and_si512(_mm512_srli_epi32(g, 3 * k), seven);
-      __m512i vO = _mm512_and_si512(_mm512_srli_epi32(g, 3 * (k + 1)), seven);
-      __m512 qE = _mm512_permutexvar_ps(vE, lut);
-      __m512 qO = _mm512_permutexvar_ps(vO, lut);
+      // 免 vpandd：16 项 LUT（8 项×2）容忍索引高位的垃圾位
+      __m512 qE = _mm512_permutexvar_ps(_mm512_srli_epi32(g, 3 * k), lut);
+      __m512 qO = _mm512_permutexvar_ps(_mm512_srli_epi32(g, 3 * (k + 1)), lut);
       const float* xb = xp_lut_sb + k * sb_stride_k + b * 16;
       accE = _mm512_fmadd_ps(qE, _mm512_load_ps(xb), accE);
       accO = _mm512_fmadd_ps(qO, _mm512_load_ps(xb + sb_stride_k), accO);
@@ -104,6 +104,55 @@ void gemv_bp_sb(const uint8_t* wsb, float scale, const float* xp_bp_sb,
 }
 
 // ---------------- GEMV 主体（行循环） ----------------
+// LUT 变体：4 行交错（寄存器压力内最大化 ILP）
+void gemv_rows_lut4(const uint8_t* w, int row0, int nrows, int n_in,
+                    const float* xp, float* y) {
+  const int sb_per_row = n_in / SB;
+  const __m512 lut = LUT_Q;
+  int r = 0;
+  for (; r + 4 <= nrows; r += 4) {
+    __m512 acc[4] = {_mm512_setzero_ps(), _mm512_setzero_ps(),
+                     _mm512_setzero_ps(), _mm512_setzero_ps()};
+    const uint8_t* rowp[4];
+    for (int rr = 0; rr < 4; rr++)
+      rowp[rr] = w + (size_t)(row0 + r + rr) * sb_per_row * ROW_BYTES;
+    for (int sb = 0; sb < sb_per_row; sb++) {
+      for (int rr = 0; rr < 4; rr++) {
+        const uint8_t* wsb = rowp[rr] + sb * ROW_BYTES;
+        __m512 sacc = _mm512_setzero_ps();
+        for (int b = 0; b < 2; b++) {
+          __m512i z = _mm512_maskz_loadu_epi8(0x0000FFFFFFFFFFFFULL, wsb + 2 + 48 * b);
+          __m512i g = _mm512_permutexvar_epi8(VPERMB_IDX, z);
+          #pragma unroll
+          for (int k = 0; k < 8; k++) {
+            __m512 qf = _mm512_permutexvar_ps(_mm512_srli_epi32(g, 3 * k), lut);
+            sacc = _mm512_fmadd_ps(qf, _mm512_load_ps(xp + (k * sb_per_row + sb) * 32 + b * 16), sacc);
+          }
+        }
+        float sc = bf16_to_f32(wsb[0] | (wsb[1] << 8));
+        acc[rr] = _mm512_fmadd_ps(sacc, _mm512_set1_ps(sc), acc[rr]);
+      }
+    }
+    for (int rr = 0; rr < 4; rr++)
+      y[row0 + r + rr] = _mm512_reduce_add_ps(acc[rr]);
+  }
+  for (; r < nrows; r++) {   // 尾行（单行结构同 lut2 的单行）
+    __m512 acc = _mm512_setzero_ps();
+    for (int sb = 0; sb < sb_per_row; sb++) {
+      const uint8_t* wsb = w + (size_t)(row0 + r) * sb_per_row * ROW_BYTES + sb * ROW_BYTES;
+      for (int b = 0; b < 2; b++) {
+        __m512i z = _mm512_maskz_loadu_epi8(0x0000FFFFFFFFFFFFULL, wsb + 2 + 48 * b);
+        __m512i g = _mm512_permutexvar_epi8(VPERMB_IDX, z);
+        for (int k = 0; k < 8; k++)
+          acc = _mm512_fmadd_ps(_mm512_permutexvar_ps(_mm512_srli_epi32(g, 3 * k), lut),
+                                _mm512_load_ps(xp + (k * sb_per_row + sb) * 32 + b * 16), acc);
+      }
+      acc = _mm512_mul_ps(acc, _mm512_set1_ps(bf16_to_f32(wsb[0] | (wsb[1] << 8))));
+    }
+    y[row0 + r] = _mm512_reduce_add_ps(acc);
+  }
+}
+
 // LUT 变体：双行交错（ILP 隐藏 extract→cvt→mac 链延迟）
 void gemv_rows_lut2(const uint8_t* w, int row0, int nrows, int n_in,
                     const float* xp, float* y) {
@@ -205,7 +254,7 @@ int main(int argc, char** argv) {
   auto run_slice = [&](int e0, int e1, float* yout) {
     for (int e = e0; e < e1; e++)
       if (a.variant == "lut")
-        gemv_rows_lut2(W + e * w_per_exp, 0, NOUT, NIN, XP, yout + e * NOUT);
+        gemv_rows_lut4(W + e * w_per_exp, 0, NOUT, NIN, XP, yout + e * NOUT);
       else
         gemv_rows<1>(W + e * w_per_exp, 0, NOUT, NIN, XP, yout + e * NOUT);
   };
