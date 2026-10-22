@@ -41,6 +41,7 @@ jobs:
               work_$tag/aie.mlir \
               --aie-generate-npu-insts --npu-insts-name=build_$tag/insts.bin \
               --aie-generate-pdi --pdi-name=build_$tag/design.pdi \
+              --aie-generate-xclbin --xclbin-name=build_$tag/unused.xclbin \
               --tmpdir=work_$tag --verbose 2>&1 | tail -10 || true
             ls -la build_$tag/
           }
