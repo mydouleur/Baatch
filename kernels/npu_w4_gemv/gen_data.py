@@ -70,7 +70,7 @@ def main():
                 B[idx, 4096:4096+128] = s16.view(np.uint8)
                 # zps：byte[group*16 + repeat*8 + i] = zp[group*8+i]
                 z = Z[ltr, lt_col*LT_N:(lt_col+1)*LT_N].reshape(8, 8)   # [group, i]
-                zr = np.repeat(z, 2, axis=1)                            # [group, repeat*8+i]
+                zr = np.concatenate([z, z], axis=1)                     # [group, repeat*8+i]
                 B[idx, 4224:4352] = zr.reshape(-1)
                 idx += 1
 
