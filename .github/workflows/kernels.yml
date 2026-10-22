@@ -83,11 +83,15 @@ jobs:
           cd kernels/npu_w4_gemv
           AIECC=$(python3 -c "from aie.tools import MLIR_AIE_BIN_DIR as b; print(b)")/aiecc
           AIE_INC=$(python3 -c "from aie.utils import config; print(config.cxx_header_path())")
-          mkdir -p build work
+          mkdir -p work
           "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 -std=c++20             -D__AIE_API_AIE_ADF_HPP__ -Wno-macro-redefined -Wno-unknown-attributes -I"$AIE_INC"             -DDIM_N=64 -DDIM_K=128 -c vm_mix_int4_64x8.cc -o work/vm_64x8.o
-          python3 vector_matrix.py --dev npu2 -N 4096 -K 4096 > work/aie.mlir
-          "$AIECC" --no-compile-host --no-xchesscc --no-xbridge --peano="$PEANO_INSTALL_DIR"             work/aie.mlir --aie-generate-npu-insts --npu-insts-name=build/insts.bin             --aie-generate-pdi --pdi-name=build/design.pdi             --aie-generate-xclbin --xclbin-name=build/unused.xclbin             --tmpdir=work --verbose 2>&1 | tail -60 || true
-          ls -la build/
+          for SZ in 4096 8192; do
+            mkdir -p build_$SZ work_$SZ
+            cp work/vm_64x8.o work_$SZ/
+            python3 vector_matrix.py --dev npu2 -N $SZ -K $SZ > work_$SZ/aie.mlir
+            "$AIECC" --no-compile-host --no-xchesscc --no-xbridge --peano="$PEANO_INSTALL_DIR"               work_$SZ/aie.mlir --aie-generate-npu-insts --npu-insts-name=build_$SZ/insts.bin               --aie-generate-pdi --pdi-name=build_$SZ/design.pdi               --aie-generate-xclbin --xclbin-name=build_$SZ/unused.xclbin               --tmpdir=work_$SZ --verbose 2>&1 | tail -40 || true
+            ls -la build_$SZ/
+          done
 
       - name: Upload artifacts
         if: always()

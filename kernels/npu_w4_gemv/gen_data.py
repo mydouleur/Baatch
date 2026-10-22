@@ -13,7 +13,6 @@ GEMV: C[N] = A[K] @ B[K,N]，B 为 int4（+bf16 scale + int8 zp，group_size=128
 import argparse, os
 import numpy as np
 
-K, N = 4096, 4096
 GS = 128          # 量化 group 沿 K
 LT_K, LT_N = 128, 64   # 大瓦片
 NCOL = 8
@@ -29,8 +28,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="data_w4")
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--size", type=int, default=4096, help="K=N（须与设计编译尺寸一致）")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
+    K = N = a.size
 
     rng = np.random.default_rng(a.seed)
     A = (rng.random(K) * 0.19).astype(np.float32)
