@@ -19,7 +19,9 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip
           pip install mlir_aie -f https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4
+          pip install llvm-aie -f https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4
           python3 -c "from aie.iron import Kernel; print('IRON OK')"
+          python3 -c "import sysconfig,os; p=os.path.join(sysconfig.get_path('platlib'),'llvm-aie','bin'); print('peano at', p, os.listdir(p) if os.path.isdir(p) else 'MISSING')"
 
       - name: Build xbf3_gemv (compile-only, npu2)
         run: |
