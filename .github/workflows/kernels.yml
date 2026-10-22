@@ -57,6 +57,8 @@ jobs:
           build_one xbf3_gemv_v4.py v4_discard --core discard --experts 64 --ncols 4
           CR=64 build_one xbf3_gemv_v5.py v5_discard --core discard --experts 64 --ncols 4 --chunk-rows 64 --l2-rows 256
           build_one xbf3_gemv_v5.py v5_discard8 --core discard --experts 64 --ncols 8 --chunk-rows 64 --l2-rows 256
+          build_one xbf3_gemv_v4.py v4_discard8 --core discard --experts 64 --ncols 8
+          build_one xbf3_gemv_v4.py v4_scalar8 --core scalar --experts 64 --ncols 8
           build_one xbf3_gemv_v5.py v5_scalar8 --core scalar --experts 64 --ncols 8 --chunk-rows 64 --l2-rows 256
           CR=64 build_one xbf3_gemv_v5.py v5_scalar --core scalar --experts 64 --ncols 4 --chunk-rows 64 --l2-rows 256
           echo "=== done ==="
