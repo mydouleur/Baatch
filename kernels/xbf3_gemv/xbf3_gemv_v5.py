@@ -126,7 +126,7 @@ def _make_argparser():
     p.add_argument("--experts", type=int, default=64)
     p.add_argument("--core", choices=["scalar", "discard"], default="scalar")
     p.add_argument("--ncols", type=int, default=4)
-    p.add_argument("--chunk-rows", type=int, default=128)
+    p.add_argument("--chunk-rows", type=int, default=64)
     p.add_argument("--l2-rows", type=int, default=512)
     return p
 
