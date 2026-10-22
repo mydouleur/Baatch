@@ -59,29 +59,28 @@ def main():
     wts = row.reshape(-1)                    # OUT*196
     if a.experts > 1:
         wts = np.tile(wts, a.experts)        # E * OUT * 196
+    xp = None
+    if a.bitplane:
+        xp = np.zeros((8, IN // SB, 32), dtype=np.float32)
+        for k in range(8):
+            for sb in range(IN // SB):
+                xp[k, sb, :] = x[sb * SB + 8 * np.arange(32) + k]
     if a.cols > 1:
         rpc = OUT // a.cols
         wts = wts.reshape(a.experts, a.cols, rpc * ROW_B)  # [E][col][rows]
         wts = np.transpose(wts, (1, 0, 2)).reshape(-1)     # [col][E][rows]
         # v3：每列 slab = [act 块(chunk_rows*196B, 前 2048B 是 fp32 x)][列权重]
         chunk_bytes = 512 * ROW_B   # = L2 块（act 独占一个 L2 块）
+        act_content = xp.reshape(-1) if a.bitplane else x   # bp 时 slab 里是相位平面 xp
         actpad = np.zeros(chunk_bytes, dtype=np.uint8)
-        actpad[: IN * 4] = x.view(np.uint8)
+        actpad[: act_content.nbytes] = act_content.view(np.uint8)
         col_bytes = wts.nbytes // a.cols
         slabs = b"".join(
             actpad.tobytes() + wts[c * col_bytes:(c + 1) * col_bytes].tobytes()
             for c in range(a.cols))
         wts = np.frombuffer(slabs, dtype=np.uint8).copy()
     wts.tofile(os.path.join(a.out, "wts.bin"))
-    if a.bitplane:
-        # xp[k][sb][i] = x[sb*256 + 8i + k]，fp32，8*2*32 = 512 floats
-        xp = np.zeros((8, IN // SB, 32), dtype=np.float32)
-        for k in range(8):
-            for sb in range(IN // SB):
-                xp[k, sb, :] = x[sb * SB + 8 * np.arange(32) + k]
-        xa = np.tile(xp.reshape(-1), a.cols) if a.cols > 1 else xp.reshape(-1)
-    else:
-        xa = np.tile(x, a.cols) if a.cols > 1 else x
+    xa = np.tile(xp.reshape(-1), a.cols) if a.bitplane and a.cols > 1 else          (xp.reshape(-1) if a.bitplane else (np.tile(x, a.cols) if a.cols > 1 else x))
     xa.tofile(os.path.join(a.out, "act.bin"))
 
     # reference: dequant with the SAME bf16-rounded scales the kernel consumes

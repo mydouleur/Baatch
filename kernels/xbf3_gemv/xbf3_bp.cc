@@ -42,6 +42,14 @@ extern "C"
 void xbf3_gemv_chunk4(const uint8_t* __restrict w, float* __restrict y) {
   const aie::vector<uint16_t, 16> m07 = aie::broadcast<uint16_t, 16>(0x0707);
   const aie::vector<int8_t, 32>  m4  = aie::broadcast<int8_t, 32>(4);
+  // k 循环常量全部提升到行循环外（loop-invariant）
+  aie::vector<uint16_t, 16> mk_v[8], sh0_v[8], sh1_v[8], sh2_v[8];
+  for (int k = 0; k < 8; k++) {
+    mk_v[k]  = aie::broadcast<uint16_t, 16>((uint16_t)g_bitmask_tab[k]);
+    sh0_v[k] = aie::broadcast<uint16_t, 16>((uint16_t)g_shift_tab[k]);
+    sh1_v[k] = aie::broadcast<uint16_t, 16>((uint16_t)g_shift_tab1[k]);
+    sh2_v[k] = aie::broadcast<uint16_t, 16>((uint16_t)g_shift_tab2[k]);
+  }
   for (int r = 0; r < CHUNK_ROWS; r++) {
     const uint8_t* rowp = w + r * (XBF3_ROW_SBS * XBF3_SB_BYTES);
     float acc_row = 0.0f;
