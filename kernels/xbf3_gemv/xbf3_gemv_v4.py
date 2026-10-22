@@ -66,7 +66,7 @@ def xbf3_gemv_v3(wts: In, act: In, out: Out, *,
     wts_col_ty = np.ndarray[(E * rows_per_col * ROW_BYTES,), np.dtype[np.uint8]]
     out_col_ty = np.ndarray[(E * rows_per_col,), np.dtype[np.float32]]
 
-    c_name = "xbf3_gemv_chunk4" if core_mode == "scalar" else "xbf3_discard_chunk4"
+    c_name = {"scalar": "xbf3_gemv_chunk4", "discard": "xbf3_discard_chunk4", "debug": "xbf3_debug4"}[core_mode]
     fn = ExternalFunction(
         c_name,
         source_file="xbf3_bp.cc",
@@ -132,7 +132,7 @@ def _make_argparser():
     p = argparse.ArgumentParser(prog="xbf3_gemv_v4")
     add_compile_args(p, default_dev="npu2", with_emit_mlir=True)
     p.add_argument("--experts", type=int, default=64)
-    p.add_argument("--core", choices=["scalar", "discard"], default="scalar")
+    p.add_argument("--core", choices=["scalar", "discard", "debug"], default="scalar")
     p.add_argument("--ncols", type=int, default=4)
     p.add_argument("--chunk-rows", type=int, default=128)
     p.add_argument("--l2-rows", type=int, default=512)

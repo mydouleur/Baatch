@@ -43,6 +43,7 @@ jobs:
             "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 $BP_FLAGS               -c xbf3_bp.cc -DCHUNK_ROWS_C=128 -o $w/xbf3_gemv_chunk4.o
             "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 $BP_FLAGS               -c xbf3_bp.cc -DCHUNK_ROWS_C=128 -o $w/xbf3_discard_chunk4.o
             "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 $BP_FLAGS               -c xbf3_bp_load.cc -o $w/xbf3_load_act4.o
+            "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 $BP_FLAGS               -c xbf3_bp.cc -DCHUNK_ROWS_C=128 -o $w/xbf3_debug4.o
           }
           build_one() {  # $1=design.py $2=tag; rest=extra design args
             local py=$1 tag=$2; shift 2
@@ -53,6 +54,7 @@ jobs:
             ls -la build_$tag/
           }
           build_one xbf3_gemv_v4.py v4_scalar --core scalar --experts 64 --ncols 4
+          build_one xbf3_gemv_v4.py v4_debug --core debug --experts 1 --ncols 4
           build_one xbf3_gemv_v4.py v4_discard --core discard --experts 64 --ncols 4
           echo "=== done ==="
 

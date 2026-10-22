@@ -88,3 +88,30 @@ extern "C"
 void xbf3_discard_chunk4(const uint8_t* __restrict w, float* __restrict y) {
   y[0] = (float)w[0];
 }
+
+// 调试：把 row0/sb0 的 8 相位提取结果直接输出（y[i*32+j] = phase i 的 lane j 值）
+extern "C"
+void xbf3_debug4(const uint8_t* __restrict w, float* __restrict y) {
+  const aie::vector<int16_t, 16> m07 = aie::broadcast<int16_t, 16>(0x0707);
+  const aie::vector<int8_t, 32>  m4  = aie::broadcast<int8_t, 32>(4);
+  const uint8_t* rowp = w;   // row0
+  aie::vector<int16_t, 16> p0 = aie::load_v<16>((const int16_t*)(rowp + 2));
+  aie::vector<int16_t, 16> p1 = aie::load_v<16>((const int16_t*)(rowp + 34));
+  aie::vector<int16_t, 16> p2 = aie::load_v<16>((const int16_t*)(rowp + 66));
+#pragma unroll
+  for (int k = 0; k < 8; k++) {
+    const aie::vector<int16_t, 16> mk = aie::broadcast<int16_t, 16>(g_bitmask_tab[k]);
+    aie::vector<int16_t, 16> t0 = aie::bit_and(p0, mk);
+    aie::vector<int16_t, 16> t1 = aie::bit_and(p1, mk);
+    aie::vector<int16_t, 16> t2 = aie::bit_and(p2, mk);
+    aie::accum<acc32, 16> acc = aie::mul(t0, aie::broadcast<int16_t, 16>(g_shift_tab[k]));
+    acc = aie::mac(acc, t1, aie::broadcast<int16_t, 16>(g_shift_tab1[k]));
+    acc = aie::mac(acc, t2, aie::broadcast<int16_t, 16>(g_shift_tab2[k]));
+    aie::vector<int16_t, 16> e = aie::bit_and(acc.to_vector<int16_t>(8), m07);
+    aie::store_v(g_scratch16, e);
+    aie::vector<int8_t, 32> e8 = aie::load_v<32>((const int8_t*)g_scratch16);
+    e8 = aie::bit_xor(e8, m4) - m4;
+    aie::vector<float, 32> qf = aie::to_float<float>(e8);
+    aie::store_v(y + k * 32, qf);
+  }
+}
