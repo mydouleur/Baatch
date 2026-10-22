@@ -83,7 +83,7 @@ Backend：
 - 基准 = **带宽 roofline**：有效带宽 ÷ bytes/token = tok/s 上限
 - **带宽实测（2026-10-22 本机探针，m0/probe/RESULTS.md）**：读写合并 sustained **~60–61 GB/s**（turbo/performance 模式；default 低 ~10%）。4 列 ShimTile 即压满共享内存路径（8 列无收益）；≥32 MB 长连续块是必要条件（16 MB 带宽近腰斩）；1000 次长跑无热衰减。对照 xrt-smi validate：GEMM 51.3 TOPS
 - **关键悬念（decode 的生死数字）**：探针是读写回环，**纯读带宽未分离**——若读写配额对半则 decode 纯读仅 ~30–33 GB/s，若读可独占总线则 ~60。需 MemTile sink 设计的纯读探针（ctrlcode txn 手工合成或 WSL2 mlir-aie）
-- 工具链事实（实测）：Windows 无 mlir-aie 编译链（cardano 是 ADF graph 编译器）；自定义空间在 **ctrlcode txn 层**（gen_elf.py 已能合成与 AMD stock 逐字节等价的控制流 ELF）；xclbin 打包需 Vitis/Linux
+- 工具链定案（2026-10-22）：**CI 编译 + 本机实测**——GitHub Actions（公开仓库免费无分钟限制）ubuntu + mlir-aie（Apache-2.0）编 kernel，本机 Windows XRT 上机实测；kernel 100% 自有源码、零 AMD 专有 blob（license 最干净）。**已放弃** Windows 本地 ctrlcode 逆向路线：能通 shim DMA 但计算 tile 写入导致过一次系统宕机，时间/稳定性成本不可接受（证据归档 m0/poc_archive/）
 - 硬件事实：XDNA2 BFP16 = 每 8 元素共享指数；MemTile 带宽合计 240 GB/s 读（非瓶颈），瓶颈在 ShimTile→NoC→DRAM；片上 SRAM ~800 GB/s → XBF 数据流 = DRAM 压缩态流入 → 片上 unpack 至 int8/MX6 车道 → 原生 MAC
 - 推论：B 档压缩暂搁置（质量优先）；MTP 为必需品；hybrid decode 定为**全量 turbo（含离电，22 W 用户判定可接受），eco 暂缓**，真实功耗待 turbo 拉满后实测（2026-10-21 用户决策）。待实测假设：NPU↔CPU 每 token 汇合的同步开销（M3' 实测）、turbo 边际功耗 +5–10 W 为估算值（引擎落地后实测）
 - **功耗模型（2026-10-21 修正）**：decode 带宽受限 → NPU 动态功耗仅 1–2 W（destevez xrt-smi 实测 1.146 W @ 65 GB/s 流式）。整机 decode 墙插 ~12–18 W，大头是 DRAM（4–6 W）+ 平台底噪 + uncore 的**固定成本**。推论：turbo 混部（CPU 专家流）的边际功耗仅 +5–10 W（CPU 核心动态功耗），能效损失 ~10% 换 ~65% 速度；eco 省的是 CPU 唤醒的边际功耗而非 NPU 本体
