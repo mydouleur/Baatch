@@ -37,6 +37,7 @@ def main():
                     help="v4: XBF3-BP 位平面打包 + fp32 相位平面激活")
     ap.add_argument("--split", action="store_true",
                     help="v5: 双通道——wtsA.bin=[act块][偶数专家], wtsB.bin=[奇数专家]")
+    ap.add_argument("--l2rows", type=int, default=512, help="L2 块行数（v5 memtile 容量限 256）")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
@@ -69,7 +70,7 @@ def main():
                 xp[k, sb, :] = x[sb * SB + 8 * np.arange(32) + k]
     # act 块内容（v3/v5 共用）：bp 时是 xp 相位平面，否则原始 x
     act_content = (xp.reshape(-1) if a.bitplane else x)
-    chunk_bytes = 512 * ROW_B   # = L2 块（act 独占一个 L2 块）
+    chunk_bytes = a.l2rows * ROW_B   # = L2 块（act 独占一个 L2 块）
     actpad = np.zeros(chunk_bytes, dtype=np.uint8)
     actpad[: act_content.nbytes] = act_content.view(np.uint8)
     if a.cols > 1 and not a.split:

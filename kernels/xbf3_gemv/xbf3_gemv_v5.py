@@ -48,11 +48,12 @@ def xbf3_gemv_v5(wtsA: In, wtsB: In, out: Out, *,
     assert E % 2 == 0
     chunks_per_expert = rows_per_col // chunk_rows          # 4 (128 行块)
     l2_per_expert = L2_WTS // (OUT // NC * ROW_BYTES)       # 1
-    assert L2_WTS == rows_per_col * ROW_BYTES               # 一个 L2 块正好一个专家
+    assert (rows_per_col * ROW_BYTES) % L2_WTS == 0         # 专家 = 整数个 L2 块
     exp_per_fifo = E // 2
 
-    slabA = L2_WTS + exp_per_fifo * L2_WTS                  # act 块 + 偶数专家
-    slabB = exp_per_fifo * L2_WTS
+    exp_bytes = rows_per_col * ROW_BYTES                     # 每专家字节数
+    slabA = L2_WTS + exp_per_fifo * exp_bytes               # act 块 + 偶数专家
+    slabB = exp_per_fifo * exp_bytes
     wtsA_ty = np.ndarray[(NC * slabA,), np.dtype[np.uint8]]
     wtsB_ty = np.ndarray[(NC * slabB,), np.dtype[np.uint8]]
     out_ty = np.ndarray[(NC * E * rows_per_col,), np.dtype[np.float32]]
@@ -127,7 +128,7 @@ def _make_argparser():
     p.add_argument("--core", choices=["scalar", "discard"], default="scalar")
     p.add_argument("--ncols", type=int, default=4)
     p.add_argument("--chunk-rows", type=int, default=64)
-    p.add_argument("--l2-rows", type=int, default=512)
+    p.add_argument("--l2-rows", type=int, default=256)
     return p
 
 
