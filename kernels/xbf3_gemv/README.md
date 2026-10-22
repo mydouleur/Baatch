@@ -33,4 +33,18 @@ arg3=wts / arg4=act / arg5=out（按 runtime sequence 操作数顺序 [wts, act,
 
 ## 实测记录
 
-（待 CI 首轮产物上机后填写：数值校验 + 带宽）
+### 2026-10-22 v1 上机（Ryzen AI 9 H 365，XDNA2，driver 32.0.203.329 / XRT 2.19）
+
+- **数值校验：PASS**。随机数据（正态权重 ×0.05 + 正态激活），2048 输出全对，
+  max_rel = 1.11e-04（fp32 累加顺序噪声水平）。50 次迭代稳定。
+- 图样测试：全 1（y=512）PASS；全 8 电平周期（y=-256）PASS；scale 区分图样抓获过
+  一个真 bug（sb 循环未推进 rowp，sb1 重复读 sb0，已修复）。
+- 时延：~119 ms/次（128 个 3136B 小块串行 DMA + 标量计算主导）——此数字不代表带宽能力，
+  带宽版（memtile + 大块 + 向量化）是 M2'-2 的事。
+- 管线：CI（ubuntu + mlir_aie 1.3.4 + llvm-aie nightly）产出 insts.bin / design.pdi /
+  metadata json；本机用 XRT 2.21.75 SDK 的 `xclbinutil.exe`（XRT GitHub release
+  `xrt_windows_sdk.zip`，免安装免管理员）组装 xclbin——**AIE_PARTITION 的
+  `file_name` 需改成本地相对路径**（xclbinutil 组装时把 PDI 内容嵌进 section）。
+- 关键坑：mlir_aie wheel 不含 Peano（需另装 llvm-aie nightly wheel）；aiecc 的
+  xclbin 生成依赖 xclbinutil，缺失时静默成功（exit 0 无产物）；1.3.4 与 main 的
+  IRON API 差异大（Runtime()/rt.sequence 习语 vs 新 fn_args 风格）。
