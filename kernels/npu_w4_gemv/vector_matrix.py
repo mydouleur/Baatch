@@ -78,11 +78,13 @@ def my_matmul(dev, N, K):
             # AIE Core Function declarations
             func_type = "vectorized" if vectorized else "scalar"
 
-            zero = external_func(f"zero_{func_type}_{dtype_out_str}", inputs=[outC_ty])
+            zero = external_func(f"zero_{func_type}_{dtype_out_str}", inputs=[outC_ty],
+                                 link_with=f"vm_{n}x{k}.o")
             # For GEVM with mixed precision: vector A (bf16), matrix B (int8), output C (bf16)
             vecmat = external_func(
                 f"vecmat_{func_type}_{dtype_in_str}_{dtype_out_str}",
                 inputs=[inA_ty, B_ty, outC_ty],
+                link_with=f"vm_{n}x{k}.o",
             )
 
             # Tile declarations
@@ -184,7 +186,7 @@ def my_matmul(dev, N, K):
             for row in range(n_rows):
                 for col in range(n_cols):
                 # Compute tile col
-                    @core(cores[row][col], f"vm_{n}x{k}.o")
+                    @core(cores[row][col])
                     def core_body():
                         for _ in range_(0xFFFFFFFF):
                             elem_out = outC_fifos[row][col].acquire(
