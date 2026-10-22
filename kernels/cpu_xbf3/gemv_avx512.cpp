@@ -44,7 +44,7 @@ static inline float bf16_to_f32(uint16_t b) { uint32_t u = (uint32_t)b << 16; fl
 void gemv_lut_sb(const uint8_t* wsb, float scale, const float* xp_lut_sb,
                  __m512& acc0, __m512& acc1) {
   // xp_lut_sb: [k][2 blocks][16 lanes] = 128 floats per sb
-  const __m512 lut = _mm512_setr_ps(-4.f, -3.f, -2.f, -1.f, 0.f, 1.f, 2.f, 3.f,
+  const __m512 lut = _mm512_setr_ps(0.f, 1.f, 2.f, 3.f, -4.f, -3.f, -2.f, -1.f,
                                     0, 0, 0, 0, 0, 0, 0, 0);
   const __m512i seven = _mm512_set1_epi32(7);
   for (int b = 0; b < 2; b++) {
@@ -136,30 +136,30 @@ int main(int argc, char** argv) {
     else if (s == "--experts") a.experts = atoi(argv[++i]);
     else if (s == "--verify-only") a.verify_only = true;
   }
-  int E = a.experts, IN = a.n_in, OUT = a.n_out;
+  int E = a.experts, NIN = a.n_in, NOUT = a.n_out;
   auto wts = read_file(a.dir + (a.variant == "lut" ? "\\wts_lut.bin" : "\\wts_bp.bin"));
   auto xp  = read_file(a.dir + (a.variant == "lut" ? "\\xp_lut.bin" : "\\xp_bp.bin"));
   auto yr  = read_file(a.dir + "\\y_ref.bin");
   const uint8_t* W = (const uint8_t*)wts.data();
   const float* XP = (const float*)xp.data();
   const float* YR = (const float*)yr.data();
-  std::vector<float> Y(E * OUT, 0.0f);
-  size_t w_per_exp = (size_t)OUT * (IN / SB) * ROW_BYTES;
+  std::vector<float> Y(E * NOUT, 0.0f);
+  size_t w_per_exp = (size_t)NOUT * (NIN / SB) * ROW_BYTES;
   size_t total_w = w_per_exp * E;
 
   auto run_slice = [&](int e0, int e1, float* yout) {
     for (int e = e0; e < e1; e++)
       if (a.variant == "lut")
-        gemv_rows<0>(W + e * w_per_exp, 0, OUT, IN, XP, yout + e * OUT);
+        gemv_rows<0>(W + e * w_per_exp, 0, NOUT, NIN, XP, yout + e * NOUT);
       else
-        gemv_rows<1>(W + e * w_per_exp, 0, OUT, IN, XP, yout + e * OUT);
+        gemv_rows<1>(W + e * w_per_exp, 0, NOUT, NIN, XP, yout + e * NOUT);
   };
 
   // verify（单线程全量）
   {
     run_slice(0, E, Y.data());
     int bad = 0; float max_rel = 0;
-    for (size_t i = 0; i < (size_t)E * OUT; i++) {
+    for (size_t i = 0; i < (size_t)E * NOUT; i++) {
       float d = fabsf(Y[i] - YR[i]);
       float rel = d / (fabsf(YR[i]) + 1e-6f);
       if (rel > max_rel) max_rel = rel;

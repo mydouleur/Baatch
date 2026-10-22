@@ -115,6 +115,10 @@ Backend：
 - **M1' 量化实验室**：旋转 + 校准 + XBF 打包工具链，PPL/HumanEval harness，出档位-质量曲线
 - **M2'**：XBF 的 NPU kernel（单 expert GEMV 打满带宽）——✅ 收官结论：管线 37.6 GB/s（8 列）；**3-bit 计算墙判定结构性**（车道错配 + 无 LUT + 无逐车道移位，v7 掩码选择路线实测否定）；**prefill 不受影响**（unpack 被 batch 摊薄 64×）
 - **M3'**：全模型 decode + KV cache + turbo 分流
+  - 预实验（go/no-go 门）：
+    - 0b CPU 3-bit LUT GEMV：验收 **2 大核 ≥24 GB/s**（45 GB/s 需 4 核，超预算不进首发）🔄
+    - 0a NPU 4-bit GEMV（参照 TileFuse，同硅片 AIE2P）：验收 ≥55 GB/s；真实风险 = 其交错预平铺布局耦合，非 ISA
+    - 0c 汇合同步延迟（XRT 完成→CPU 唤醒端到端，分布测量）：验收每汇合 ≤0.5 ms、每 token ≤1 ms（60 tok/s 预算的 6%）
 - **M4'**：MTP 投机解码
 - 风险排序：M1' 量化质量 > M2' kernel 学习曲线 > 驱动/工具链成熟度
 
