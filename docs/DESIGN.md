@@ -133,3 +133,4 @@ Backend：
 - **参照资产：TileFuse**（[arXiv 2606.11357](https://arxiv.org/pdf/2606.11357)，源码 github.com/glassescrab/mlir-aie fork）——同硅片 W4A16 GEMV 公开实现：memcore 辅助 2D 权重分发（32 核全开实证）、加宽微内核（64 输出/迭代）、离线交错预平铺。M3' NPU 4-bit GEMV 直接参照
 - **已评审并弃用**：T-MAN 表查找（XBF3 均匀量化无码本稀疏性可利用，AIE2P select 实测贵）；PMPD 渐进精度（与 MTP 同轴，MTP 更便宜）；AIE2P 编译期 LUT（仅常量表，对均匀量化无意义）
 - **思路 1（3-bit NPU decode kernel）封存入档**：终审判决——3-bit 与 AIE2P 车道结构性错配（v1–v7 七版实测，0.57 GB/s 真实计算封顶；修正版双 2-bit 平面 修法B：q=3u₂+u₁−4 见 kernels/xbf3_gemv/README.md）。重启条件：①M3' 实测 decode 明确 CPU 侧瓶颈且有带宽余量；②必须吸收 TileFuse memcore 2D 分发 + 加宽微内核；③现实预期 ~10–15 GB/s（插件级，非主力）
+- **方案 4（热冷混合精度：热专家 4-bit→NPU / 冷专家 3-bit→CPU）封存入档**（2026-10-22 用户决定）：内存账已算清——静态按专家分配不复制存储，热占比 25%/50% 时总体积 +1.0/+1.8 GB（32GB 机仍宽松）；质量 ≥ 方案 A（热专家升精度）；风险在静态分配对分布漂移的鲁棒性（正确性无损，性能降）。重启条件：0a（NPU 4-bit GEMV 实测 ≥55 GB/s）+ 冷热 profile 工具就绪（M1' v1）
