@@ -8,9 +8,10 @@
 #include <aie_api/aie.hpp>
 
 extern "C" void dequant_dbg(const int8_t* __restrict b,
-                            uint8_t* __restrict st1,
-                            int8_t* __restrict st2,
+                            uint8_t* __restrict outA,   // [0]=st1 u8, [8192]=st2 i8
                             bfloat16* __restrict st3) {
+  uint8_t* st1 = outA;
+  int8_t* st2 = (int8_t*)(outA + 8192);
   const unsigned colA = 16, colB = 8, size_B = 64;
   const int8_t* pB_quantized = b;
   const int8_t* pBs_b = b + 64 * 128 / 2;

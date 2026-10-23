@@ -12,38 +12,35 @@ from aie.utils.hostruntime.argparse import add_compile_args, device_from_args
 from aie.utils.hostruntime.cli import run_design_cli
 
 in_ty = np.ndarray[(4352,), np.dtype[np.int8]]
-st1_ty = np.ndarray[(8192,), np.dtype[np.uint8]]
-st2_ty = np.ndarray[(8192,), np.dtype[np.int8]]
+stA_ty = np.ndarray[(16384,), np.dtype[np.uint8]]   # st1(8KB) + st2(8KB)
 st3_ty = np.ndarray[(8192,), np.dtype[bfloat16]]
 
 
 @jit
-def dequant_dbg(inp: In, s1: Out, s2: Out, s3: Out):
+def dequant_dbg(inp: In, sA: Out, s3: Out):
     fn = ExternalFunction(
         "dequant_dbg", source_file="dequant_dbg.cc",
-        arg_types=[in_ty, st1_ty, st2_ty, st3_ty],
+        arg_types=[in_ty, stA_ty, st3_ty],
         compile_flags=["-O2"],
     )
     of_in = ObjectFifo(in_ty, name="in")
-    of1 = ObjectFifo(st1_ty, name="st1")
-    of2 = ObjectFifo(st2_ty, name="st2")
+    ofA = ObjectFifo(stA_ty, name="stA")
     of3 = ObjectFifo(st3_ty, name="st3")
 
-    def core_body(if_, o1, o2, o3, fn):
+    def core_body(if_, oA, o3, fn):
         ei = if_.acquire(1)
-        a = o1.acquire(1); b = o2.acquire(1); c = o3.acquire(1)
-        fn(ei, a, b, c)
+        a = oA.acquire(1); c = o3.acquire(1)
+        fn(ei, a, c)
         if_.release(1)
-        o1.release(1); o2.release(1); o3.release(1)
+        oA.release(1); o3.release(1)
 
-    worker = Worker(core_body, fn_args=[of_in.cons(), of1.prod(), of2.prod(), of3.prod(), fn])
+    worker = Worker(core_body, fn_args=[of_in.cons(), ofA.prod(), of3.prod(), fn])
 
     rt = Runtime()
-    with rt.sequence(in_ty, st1_ty, st2_ty, st3_ty) as (i_h, o1_h, o2_h, o3_h):
+    with rt.sequence(in_ty, stA_ty, st3_ty) as (i_h, oA_h, o3_h):
         rt.start(worker)
         rt.fill(of_in.prod(), i_h)
-        rt.drain(of1.cons(), o1_h, wait=False)
-        rt.drain(of2.cons(), o2_h, wait=False)
+        rt.drain(ofA.cons(), oA_h, wait=False)
         rt.drain(of3.cons(), o3_h, wait=True)
 
     return Program(iron.get_current_device(), rt).resolve_program()
