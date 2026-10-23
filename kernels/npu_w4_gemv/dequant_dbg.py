@@ -23,9 +23,9 @@ def dequant_dbg(inp: In, sA: Out, s3: Out):
         arg_types=[in_ty, stA_ty, st3_ty],
         compile_flags=["-O2"],
     )
-    of_in = ObjectFifo(in_ty, name="in")
-    ofA = ObjectFifo(stA_ty, name="stA")
-    of3 = ObjectFifo(st3_ty, name="st3")
+    of_in = ObjectFifo(in_ty, name="in", depth=1)
+    ofA = ObjectFifo(stA_ty, name="stA", depth=1)
+    of3 = ObjectFifo(st3_ty, name="st3", depth=1)
 
     def core_body(if_, oA, o3, fn):
         ei = if_.acquire(1)
