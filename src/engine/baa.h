@@ -22,6 +22,7 @@ struct BaaTensor {
   uint64_t size;       // packed_size
   // BF16 访问
   const uint16_t* bf16() const { return (const uint16_t*)data; }
+  const float* f32() const { return (const float*)data; }
 };
 
 struct Baa {

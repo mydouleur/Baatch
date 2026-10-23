@@ -2,6 +2,7 @@
 #pragma once
 #include "baa.h"
 #include "kernels.h"
+#include "kernels_xbf.h"
 #include <vector>
 #include <string>
 
@@ -52,24 +53,43 @@ struct Model {
   const BaaTensor& T(const std::string& n) const { return baa.at(n); }
   bool is_gdn(int l) const { return (l + 1) % Cfg::FULL_INTERVAL != 0; }
 
-  // GEMV 包装：bf16 张量 [out,in]，y = W@x
+  std::vector<int8_t> xe, xo, xq4;
+  // GEMV 包装：按 scheme 分发（0=BF16 5=F32 3=XBF4 4=XBF2）
   void mv(const BaaTensor& w, const float* x, float* y) {
     int R = (int)w.shape[w.ndim - 2], C = (int)w.shape[w.ndim - 1];
-    gemv_bf16(pool, w.bf16(), R, C, x, y);
-  }
-  // XBF3 专家 GEMV：t 为 3D [E, out, in] 或 2D
-  void mv_xbf3(const BaaTensor& t, int e, const float* x, float* y) {
-    int R, C; const uint8_t* base;
-    if (t.ndim == 3) {
-      R = (int)t.shape[1]; C = (int)t.shape[2];
-      base = t.data + (size_t)e * R * (C / XBF_SB) * 98;
-    } else {
-      R = (int)t.shape[0]; C = (int)t.shape[1];
-      base = t.data;
-    }
+    if (w.scheme == 0) { gemv_bf16(pool, w.bf16(), R, C, x, y); return; }
+    if (w.scheme == 5) { gemv_f32(pool, w.f32(), R, C, x, y); return; }
     xq.resize(C); sumxq.resize(C / XBF_SB);
     sx = quant_xq(x, C, xq.data(), sumxq.data());
-    gemv_xbf3(pool, base, R, C, xq.data(), sumxq.data(), sx, y);
+    if (w.scheme == 3) {
+      xe.resize(C / 2); xo.resize(C / 2);
+      xq_split4(xq.data(), C, xe.data(), xo.data());
+      int half = (R / 2 + 15) & ~15;
+      pool.run([&](int id) {
+        if (id == 0) gemv_xbf4_rows(w.data, 0, half, C, xe.data(), xo.data(), sumxq.data(), sx, y);
+        else gemv_xbf4_rows(w.data, half, R - half, C, xe.data(), xo.data(), sumxq.data(), sx, y);
+      });
+      return;
+    }
+    if (w.scheme == 4) {
+      xq4.resize(C);
+      xq_split2(xq.data(), C, xq4.data());
+      const int8_t* q4[4] = {xq4.data(), xq4.data() + C/4, xq4.data() + C/2, xq4.data() + 3*C/4};
+      int half = (R / 2 + 15) & ~15;
+      pool.run([&](int id) {
+        if (id == 0) gemv_xbf2_rows(w.data, 0, half, C, q4, sumxq.data(), sx, y);
+        else gemv_xbf2_rows(w.data, half, R - half, C, q4, sumxq.data(), sx, y);
+      });
+      return;
+    }
+    throw std::runtime_error("unsupported scheme");
+  }
+  // 专家 GEMV：v1 容器已按专家拆目录项，e 由调用方拼进名字——此接口仅兼容旧调用
+  void mv_xbf3(const BaaTensor& t, int e, const float* x, float* y) { mv(t, x, y); }
+  // scheme 感知 RMSNorm
+  void nrm(const BaaTensor& t, const float* x, int n, float* y, bool plus1) {
+    if (t.scheme == 5) rmsnorm_f32(x, t.f32(), n, y, Cfg::EPS, plus1);
+    else rmsnorm(x, t.bf16(), n, y, Cfg::EPS, plus1);
   }
 };
 
@@ -77,28 +97,28 @@ struct Model {
 static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* xout) {
   using namespace Cfg;
   std::vector<float> xn(H), qkv(QKV_DIM), z(VAL_DIM), beta(VH), alpha(VH);
-  rmsnorm(xin, m.T(LN(l, "input_layernorm.weight")).bf16(), H, xn.data(), Cfg::EPS, true);
+  m.nrm(m.T(LN(l, "input_layernorm.weight")), xin, H, xn.data(), true);
   m.mv(m.T(LN(l, "linear_attn.in_proj_qkv.weight")), xn.data(), qkv.data());
   m.mv(m.T(LN(l, "linear_attn.in_proj_z.weight")), xn.data(), z.data());
   m.mv(m.T(LN(l, "linear_attn.in_proj_b.weight")), xn.data(), beta.data());
   m.mv(m.T(LN(l, "linear_attn.in_proj_a.weight")), xn.data(), alpha.data());
-  const uint16_t* dt_b = m.T(LN(l, "linear_attn.dt_bias")).bf16();
-  const uint16_t* a_log = m.T(LN(l, "linear_attn.A_log")).bf16();
+  const float* dt_b = m.T(LN(l, "linear_attn.dt_bias")).f32();
+  const float* a_log = m.T(LN(l, "linear_attn.A_log")).f32();
   float g[VH];
   for (int j = 0; j < VH; j++) {
-    float a = softplusf(alpha[j] + bf16_to_f32(dt_b[j]));
-    g[j] = -a * expf(bf16_to_f32(a_log[j]));   // ssm_a = -exp(A_log)（llama qwen35moe）
+    float a = softplusf(alpha[j] + dt_b[j]);
+    g[j] = -a * expf(a_log[j]);   // ssm_a = -exp(A_log)（llama qwen35moe）
     beta[j] = sigmoidf(beta[j]);
   }
   // conv1d depthwise 因果（k=4）：state 3 个 + 当前 qkv
-  const uint16_t* cw = m.T(LN(l, "linear_attn.conv1d.weight")).bf16();  // [8192,1,4]
+  const float* cw = m.T(LN(l, "linear_attn.conv1d.weight")).f32();  // [8192,1,4]
   float window[4];
   std::vector<float> qc(QKV_DIM);
   for (int c = 0; c < QKV_DIM; c++) {
     window[0] = st.conv[c]; window[1] = st.conv[QKV_DIM + c]; window[2] = st.conv[2 * QKV_DIM + c];
     window[3] = qkv[c];
     float s = 0;
-    for (int t = 0; t < 4; t++) s += window[t] * bf16_to_f32(cw[c * 4 + t]);
+    for (int t = 0; t < 4; t++) s += window[t] * cw[c * 4 + t];
     qc[c] = siluf(s);
   }
   // conv state 左移
@@ -147,7 +167,7 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
     }
   }
   // gated norm：per-head RMSNorm(128) × w_norm × SiLU(z)
-  const uint16_t* nw = m.T(LN(l, "linear_attn.norm.weight")).bf16();
+  const float* nw = m.T(LN(l, "linear_attn.norm.weight")).f32();
   std::vector<float> og(VAL_DIM);
   for (int j = 0; j < VH; j++) {
     float* p = o.data() + j * HD;
@@ -155,7 +175,7 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
     for (int i = 0; i < HD; i++) ss += p[i] * p[i];
     float inv = 1.f / sqrtf(ss / HD + EPS);
     for (int i = 0; i < HD; i++)
-      og[j * HD + i] = p[i] * inv * bf16_to_f32(nw[i]) * siluf(z[j * HD + i]);
+      og[j * HD + i] = p[i] * inv * nw[i] * siluf(z[j * HD + i]);
   }
   std::vector<float> dec(H);
   m.mv(m.T(LN(l, "linear_attn.out_proj.weight")), og.data(), dec.data());
@@ -166,24 +186,24 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
 static void attn_decode(Model& m, int l, AttnState& st, int pos, const float* xin, float* xout) {
   using namespace Cfg;
   std::vector<float> xn(H), qg(QPROJ), kk(KVH * AHD), vv(KVH * AHD);
-  rmsnorm(xin, m.T(LN(l, "input_layernorm.weight")).bf16(), H, xn.data(), Cfg::EPS, true);
+  m.nrm(m.T(LN(l, "input_layernorm.weight")), xin, H, xn.data(), true);
   m.mv(m.T(LN(l, "self_attn.q_proj.weight")), xn.data(), qg.data());
   m.mv(m.T(LN(l, "self_attn.k_proj.weight")), xn.data(), kk.data());
   m.mv(m.T(LN(l, "self_attn.v_proj.weight")), xn.data(), vv.data());
-  const uint16_t* qnw = m.T(LN(l, "self_attn.q_norm.weight")).bf16();
-  const uint16_t* knw = m.T(LN(l, "self_attn.k_norm.weight")).bf16();
+  const float* qnw = m.T(LN(l, "self_attn.q_norm.weight")).f32();
+  const float* knw = m.T(LN(l, "self_attn.k_norm.weight")).f32();
   // 逐头 RMSNorm（Q 用前半 256，gate 后半）
   for (int h = 0; h < QH; h++) {
     float* p = qg.data() + h * 2 * AHD;
     float ss = 0; for (int i = 0; i < AHD; i++) ss += p[i] * p[i];
     float inv = 1.f / sqrtf(ss / AHD + EPS);
-    for (int i = 0; i < AHD; i++) p[i] = p[i] * inv * (1.f + bf16_to_f32(qnw[i]));
+    for (int i = 0; i < AHD; i++) p[i] = p[i] * inv * (1.f + qnw[i]);
   }
   for (int h = 0; h < KVH; h++) {
     float* p = kk.data() + h * AHD;
     float ss = 0; for (int i = 0; i < AHD; i++) ss += p[i] * p[i];
     float inv = 1.f / sqrtf(ss / AHD + EPS);
-    for (int i = 0; i < AHD; i++) p[i] = p[i] * inv * (1.f + bf16_to_f32(knw[i]));
+    for (int i = 0; i < AHD; i++) p[i] = p[i] * inv * (1.f + knw[i]);
   }
   // RoPE：前 ROPE_DIM 维，theta 1e7，interleaved（mrope_interleaved=true）
   auto rope = [&](float* vec, int nheads) {
@@ -240,7 +260,7 @@ static void attn_decode(Model& m, int l, AttnState& st, int pos, const float* xi
 static void moe(Model& m, int l, const float* xin, float* xout) {
   using namespace Cfg;
   std::vector<float> xn(H);
-  rmsnorm(xin, m.T(LN(l, "post_attention_layernorm.weight")).bf16(), H, xn.data(), Cfg::EPS, true);
+  m.nrm(m.T(LN(l, "post_attention_layernorm.weight")), xin, H, xn.data(), true);
   std::vector<float> logits(NE);
   m.mv(m.T(LN(l, "mlp.gate.weight")), xn.data(), logits.data());
   // softmax → top8 → 归一化
@@ -256,17 +276,22 @@ static void moe(Model& m, int l, const float* xin, float* xout) {
     float wsum = 0;
     for (int t = 0; t < TOPK; t++) { top[t] = idx[t].second; tw[t] = idx[t].first; wsum += tw[t]; }
     for (int t = 0; t < TOPK; t++) tw[t] /= std::max(wsum, 1e-9f);
+    static bool dbg = getenv("MOE_DBG") != nullptr;
+    if (dbg) { fprintf(stderr, "  top8 L%d:", l); for (int t = 0; t < TOPK; t++) fprintf(stderr, " %d(%.3f)", top[t], tw[t]); fprintf(stderr, "\n"); }
   }
-  const BaaTensor& gu = m.T(LN(l, "mlp.experts.gate_up_proj"));
-  const BaaTensor& dn = m.T(LN(l, "mlp.experts.down_proj"));
+  // v1 容器：专家按粒度独立目录项（layers.N.mlp.experts.gate_up_proj.{e}），
+  // scheme 逐专家读取——禁止按层假设统一位宽（docs v1 定案）
   std::vector<float> acc(H, 0.f), guv(2 * MI), hd(MI), dov(H);
+  char nmbuf[160];
   for (int t = 0; t < TOPK; t++) {
-    m.mv_xbf3(gu, top[t], xn.data(), guv.data());
+    snprintf(nmbuf, 160, "layers.%d.mlp.experts.gate_up_proj.%d", l, top[t]);
+    m.mv(m.T(nmbuf), xn.data(), guv.data());
     for (int i = 0; i < MI; i++) {
       float g = guv[i], u = guv[MI + i];      // 前半 gate、后半 up
       hd[i] = siluf(g) * u;
     }
-    m.mv_xbf3(dn, top[t], hd.data(), dov.data());
+    snprintf(nmbuf, 160, "layers.%d.mlp.experts.down_proj.%d", l, top[t]);
+    m.mv(m.T(nmbuf), hd.data(), dov.data());
     for (int i = 0; i < H; i++) acc[i] += tw[t] * dov[i];
   }
   // 共享专家（dense SwiGLU + sigmoid 门）

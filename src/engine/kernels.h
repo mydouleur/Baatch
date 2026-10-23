@@ -149,6 +149,28 @@ static inline float quant_xq(const float* x, int n, int8_t* xq, float* sumxq) {
   return sx;
 }
 
+// ---------------- f32 GEMV（路由器/小权重不压） ----------------
+static inline void gemv_f32_rows(const float* W, int r0, int r1, int C,
+                                 const float* x, float* y) {
+  for (int r = r0; r < r1; r++) {
+    const float* wr = W + (size_t)r * C;
+    __m512 a0 = _mm512_setzero_ps(), a1 = _mm512_setzero_ps();
+    for (int c = 0; c + 32 <= C; c += 32) {
+      a0 = _mm512_fmadd_ps(_mm512_loadu_ps(wr + c), _mm512_loadu_ps(x + c), a0);
+      a1 = _mm512_fmadd_ps(_mm512_loadu_ps(wr + c + 16), _mm512_loadu_ps(x + c + 16), a1);
+    }
+    y[r] = _mm512_reduce_add_ps(_mm512_add_ps(a0, a1));
+  }
+}
+static inline void gemv_f32(Pool& pool, const float* W, int R, int C,
+                            const float* x, float* y) {
+  int half = (R / 2 + 15) & ~15;
+  pool.run([&](int id) {
+    if (id == 0) gemv_f32_rows(W, 0, half, C, x, y);
+    else gemv_f32_rows(W, half, R, C, x, y);
+  });
+}
+
 // ---------------- 小 ops（fp32） ----------------
 // qwen3_5_moe 两种 RMSNorm：plus1=true → ×(1+w)（input/post/qk/final norm，零中心权重）；
 // plus1=false → ×w（GDN 输出门控 norm，ones 初始化权重）
@@ -161,6 +183,16 @@ static inline void rmsnorm(const float* x, const uint16_t* w_bf, int n, float* y
     for (int i = 0; i < n; i++) y[i] = x[i] * inv * (1.f + bf16_to_f32(w_bf[i]));
   else
     for (int i = 0; i < n; i++) y[i] = x[i] * inv * bf16_to_f32(w_bf[i]);
+}
+static inline void rmsnorm_f32(const float* x, const float* w, int n, float* y,
+                               float eps = 1e-6f, bool plus1 = false) {
+  float ss = 0;
+  for (int i = 0; i < n; i++) ss += x[i] * x[i];
+  float inv = 1.f / sqrtf(ss / n + eps);
+  if (plus1)
+    for (int i = 0; i < n; i++) y[i] = x[i] * inv * (1.f + w[i]);
+  else
+    for (int i = 0; i < n; i++) y[i] = x[i] * inv * w[i];
 }
 static inline float sigmoidf(float x) { return 1.f / (1.f + expf(-x)); }
 static inline float softplusf(float x) { return x > 20.f ? x : log1pf(expf(x)); }

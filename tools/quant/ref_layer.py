@@ -33,6 +33,7 @@ def main():
     ap.add_argument("--ntok", type=int, default=1)
     ap.add_argument("--x-embed", type=int, default=None, help="用 embed[token] 作输入（真实输入对拍 HF）")
     ap.add_argument("--skip-moe", action="store_true")
+    ap.add_argument("--sim-xbf4", action="store_true", help="XBF4 档张量先量化再反解（模拟引擎噪声）")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     mr = ModelReader(a.src)
@@ -44,7 +45,22 @@ def main():
     if a.x_embed is not None:
         xs[0] = mr.read("model.language_model.embed_tokens.weight", (a.x_embed,)).astype(np.float32)
 
-    def T(n): return mr.read(P + n)
+    def T(n):
+        w = mr.read(P + n)
+        is_q4 = (n.endswith(".weight") and "norm" not in n and "conv1d" not in n
+                 and (n.split(".")[0] in ("linear_attn", "self_attn")
+                      or n.startswith("mlp.shared_expert") or ".experts." in n))
+        if a.sim_xbf4 and is_q4:
+            from baa_writer_v1 import quant_pack4
+            pk = np.frombuffer(quant_pack4(w.reshape(-1, w.shape[-1]).astype(np.float32)), dtype=np.uint8)
+            rows, K = int(np.prod(w.shape[:-1])), w.shape[-1]
+            pk = pk.reshape(rows, K//256, 130)
+            sc = (pk[...,0].astype(np.uint16) | (pk[...,1].astype(np.uint16)<<8))
+            sf = (sc.astype(np.uint32)<<16).view(np.float32)
+            nib = pk[...,2:]
+            q = (np.stack([nib & 0xF, nib >> 4], axis=-1).reshape(rows, K//256, 256)).astype(np.int16) - 8
+            w = (q * sf[...,None]).reshape(w.shape)
+        return w
 
     Wqkv = T("linear_attn.in_proj_qkv.weight")
     Wz = T("linear_attn.in_proj_z.weight")

@@ -62,6 +62,8 @@ int main(int argc, char** argv) { try {
     }
     moe(m, L, y1.data(), y2.data());
     auto t1 = std::chrono::steady_clock::now();
+    { FILE* f = fopen("y_cpp_gdn.bin", "wb"); fwrite(y1.data(), 4, Cfg::H, f); fclose(f); }
+    { FILE* f = fopen("y_cpp_full.bin", "wb"); fwrite(y2.data(), 4, Cfg::H, f); fclose(f); }
     compare("full", y2, yf_ref);
     printf("layer time: %.1f ms (last token)\n", std::chrono::duration<double>(t1 - t0).count() * 1e3);
     return 0;
@@ -79,8 +81,12 @@ int main(int argc, char** argv) { try {
     std::vector<float> x(Cfg::H), x2(Cfg::H);
     int npos = 0;
     for (int tok : pids) {
-      { const uint16_t* e = emb.bf16() + (size_t)tok * Cfg::H;
-        for (int i = 0; i < Cfg::H; i++) x[i] = bf16_to_f32(e[i]); }
+      { if (emb.scheme == 3)
+          dequant_xbf4_row(emb.data + (size_t)tok * (Cfg::H / 256) * 130, Cfg::H, x.data());
+        else {
+          const uint16_t* e = emb.bf16() + (size_t)tok * Cfg::H;
+          for (int i = 0; i < Cfg::H; i++) x[i] = bf16_to_f32(e[i]);
+        } }
       bool last = (npos == 0);   // 首 token（零状态，直接可比）
       for (int l = 0; l < Cfg::NLAYERS; l++) {
         if (m.is_gdn(l)) gdn_decode(m, l, gst[l], x.data(), x2.data());
@@ -136,15 +142,19 @@ int main(int argc, char** argv) { try {
     for (int step = 0; step < (int)ids.size() + n_gen; step++) {
       int tok = (step < (int)ids.size()) ? ids[step] : next;
       // embed
-      { const uint16_t* e = emb.bf16() + (size_t)tok * Cfg::H;
-        for (int i = 0; i < Cfg::H; i++) x[i] = bf16_to_f32(e[i]); }
+      { if (emb.scheme == 3)
+          dequant_xbf4_row(emb.data + (size_t)tok * (Cfg::H / 256) * 130, Cfg::H, x.data());
+        else {
+          const uint16_t* e = emb.bf16() + (size_t)tok * Cfg::H;
+          for (int i = 0; i < Cfg::H; i++) x[i] = bf16_to_f32(e[i]);
+        } }
       auto t0 = std::chrono::steady_clock::now();
       for (int l = 0; l < Cfg::NLAYERS; l++) {
         if (m.is_gdn(l)) gdn_decode(m, l, gst[l], x.data(), x2.data());
         else attn_decode(m, l, ast[l], pos, x.data(), x2.data());
         moe(m, l, x2.data(), x.data());
       }
-      rmsnorm(x.data(), fnorm.bf16(), Cfg::H, x.data(), Cfg::EPS, true);
+      m.nrm(fnorm, x.data(), Cfg::H, x.data(), true);
       m.mv(lmh, x.data(), logits.data());
       next = (int)(std::max_element(logits.begin(), logits.end()) - logits.begin());
       auto t1 = std::chrono::steady_clock::now();
