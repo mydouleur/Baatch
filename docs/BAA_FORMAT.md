@@ -43,8 +43,8 @@ Baatch 引擎的模型容器。厂商中立；量化方案由方案 tag 标识�
 
 ```
 per 行（K 维连续）：K/256 个 superblock
-superblock(256 权重) = [2B BF16 scale][96B 位平面数据]
-位平面：3 × 32B（P0/P1/P2，对应 q = b0 + 2b1 − 4b2 编码，与 vnni2 kernel 消费的 vpmultishiftqb 布局一致）
+superblock(256 权重) = [2B BF16 scale][96B 位组数据]
+位组：连续 pack3 跨字节打包（vnni2 kernel 的 vpmultishiftqb 布局；M3'-1 实测位平面版 ~4 GB/s/核，弃用）
 行起始 64B 对齐（行间可含 padding）
 ```
 
@@ -58,8 +58,8 @@ superblock(256) = [2B BF16 scale][128B nibble 数据]（lo|hi<<4 字节内打包
 ## XBF2 张量数据（2.0625 bpw）
 
 ```
-superblock(256) = [2B BF16 scale][64B 位平面数据]
-位平面：2 × 32B（P0/P1，q = b0 + 2b1 编码，CPU vnni LUT kernel 的 vpmultishiftqb 布局）
+superblock(256) = [2B BF16 scale][64B 位组数据]
+位组：连续 pack2（4 权重/字节，vnni LUT kernel 的 vpmultishiftqb 布局）
 行起始 64B 对齐
 量化工艺：imatrix 加权舍入（组内 scale 小网格搜索最小化加权误差）+ Hadamard 预旋转（旋转矩阵经 aux_offset 引用）
 ```
