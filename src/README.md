@@ -39,10 +39,12 @@ src/
 rel_l2≤3e-4）；numpy 参考 vs HF transformers 逐层 rel_l2 = 3e-3（XBF3 量化噪声量级）；
 全模型贪心 decode 首 token = `<think>`（与 HF 完全一致），后续连贯英文。
 
-**decode 速度现状**：~8.5 tok/s（2 大核）——瓶颈不是专家 XBF3（vnni2 39 GB/s 达标），
-而是**其余全部 bf16 权重**（qkv/z/out/shared/router/lm_head ≈ 4.4GB/token 纯 DRAM 流，
-39 GB/s → ~113ms/token 下限）。要 ≥20 tok/s 必须按 v1 定案把非专家权重也压成
-XBF2/XBF4（这就是混合精度配比的动机）。
+**decode 速度现状**（v1 XBF24 全量打包后，2 大核暖态实测）：**~70–130ms/token ≈
+8–14 tok/s**（min 69.5ms ≈ 14.4 tok/s；方差来自页缓存与未向量化的标量段）。
+较 v0（专家 XBF3+其余 BF16）的 8.7 tok/s 提升 ~1.3–1.5×，未到 20 tok/s：
+每 token 字节 ~1.3GB（专家 XBF2/4 ~0.39GB + 密集 XBF4 ~0.6GB + lm_head 0.26GB + F32 小件）
+→ DRAM 地板 ~33ms/token；差额的 2-3× 来自标量段（router softmax/norm/conv/门控）与
+激活量化循环的未向量化。delta rule 已 AVX-512 化（~1.3× 总提速）。
 
 ### v1 定案顺手遵守项（来自主线 docs）
 

@@ -83,7 +83,10 @@ int main(int argc, char** argv) { try {
     for (int tok : pids) {
       { if (emb.scheme == 3)
           dequant_xbf4_row(emb.data + (size_t)tok * (Cfg::H / 256) * 130, Cfg::H, x.data());
-        else {
+        else if (emb.scheme == 5) {
+          const float* e = emb.f32() + (size_t)tok * Cfg::H;
+          memcpy(x.data(), e, Cfg::H * 4);
+        } else {
           const uint16_t* e = emb.bf16() + (size_t)tok * Cfg::H;
           for (int i = 0; i < Cfg::H; i++) x[i] = bf16_to_f32(e[i]);
         } }
@@ -144,7 +147,10 @@ int main(int argc, char** argv) { try {
       // embed
       { if (emb.scheme == 3)
           dequant_xbf4_row(emb.data + (size_t)tok * (Cfg::H / 256) * 130, Cfg::H, x.data());
-        else {
+        else if (emb.scheme == 5) {
+          const float* e = emb.f32() + (size_t)tok * Cfg::H;
+          memcpy(x.data(), e, Cfg::H * 4);
+        } else {
           const uint16_t* e = emb.bf16() + (size_t)tok * Cfg::H;
           for (int i = 0; i < Cfg::H; i++) x[i] = bf16_to_f32(e[i]);
         } }

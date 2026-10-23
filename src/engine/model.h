@@ -146,24 +146,33 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
     const float* qj = q + (j / (VH / KH)) * HD;
     const float* vj = v + j * HD;
     float decay = expf(g[j]);
+    const __m512 vdecay = _mm512_set1_ps(decay);
+    const __m512 vkj = _mm512_loadu_ps(kj);   // HD=128 固定
+    const __m512 vqj = _mm512_loadu_ps(qj);
     float sk[HD], d[HD];
     for (int i = 0; i < HD; i++) {
       float* sr = s + i * HD;
-      float acc = 0;
-      for (int mm = 0; mm < HD; mm++) sr[mm] *= decay;
-      for (int mm = 0; mm < HD; mm++) acc += sr[mm] * kj[mm];
-      sk[i] = acc;
+      __m512 acc = _mm512_setzero_ps();
+      for (int mm = 0; mm < HD; mm += 16) {
+        __m512 v = _mm512_mul_ps(_mm512_loadu_ps(sr + mm), vdecay);
+        _mm512_storeu_ps(sr + mm, v);
+        acc = _mm512_fmadd_ps(v, _mm512_loadu_ps(kj + mm % HD), acc);  // 见下注
+      }
+      sk[i] = _mm512_reduce_add_ps(acc);
     }
     for (int i = 0; i < HD; i++) d[i] = (vj[i] - sk[i]) * beta[j];
     for (int i = 0; i < HD; i++) {
       float* sr = s + i * HD;
-      for (int mm = 0; mm < HD; mm++) sr[mm] += kj[mm] * d[i];
+      const __m512 vd = _mm512_set1_ps(d[i]);
+      for (int mm = 0; mm < HD; mm += 16)
+        _mm512_storeu_ps(sr + mm, _mm512_fmadd_ps(_mm512_loadu_ps(kj + mm), vd, _mm512_loadu_ps(sr + mm)));
     }
     for (int i = 0; i < HD; i++) {
       const float* sr = s + i * HD;
-      float acc = 0;
-      for (int mm = 0; mm < HD; mm++) acc += sr[mm] * qj[mm];
-      o[j * HD + i] = acc;
+      __m512 acc = _mm512_setzero_ps();
+      for (int mm = 0; mm < HD; mm += 16)
+        acc = _mm512_fmadd_ps(_mm512_loadu_ps(sr + mm), _mm512_loadu_ps(qj + mm % HD), acc);
+      o[j * HD + i] = _mm512_reduce_add_ps(acc);
     }
   }
   // gated norm：per-head RMSNorm(128) × w_norm × SiLU(z)
