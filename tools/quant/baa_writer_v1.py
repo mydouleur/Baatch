@@ -79,6 +79,38 @@ def scheme_of(n, layer):
         return SCHEME_BF16 if n.startswith("mtp.") else SCHEME_F32
     return SCHEME_XBF4
 
+def pack4_pretiled(w2d):
+    """XBF4 + TileFuse 预平铺（gemv_w4a16/test.cpp 布局）：大瓦片 128(K)x64(N)
+    = 4096B 权重 + 128B bf16 scale + 128B zp（zp=8 常数，对称量化）；
+    大瓦片 col_mod(=lt_col%8) → lt_col → ltr 主序；小瓦片 8x8 行主序 lo|hi<<4。
+    w2d: [N, K] fp32（行=输出）。返回 bytes。"""
+    N, K = w2d.shape
+    LT_K, LT_N, NCOL = 128, 64, 8
+    # 量化（与 quant_pack4 同参：absmax/8，clip [-8,7]，field=q+8）
+    b = w2d.reshape(N, K // 256, 256)
+    s = (np.maximum(np.abs(b).max(axis=-1), 1e-12) / 8.0).astype(np.float32)   # [N, K/256]
+    q = np.clip(np.round(b / s[..., None]), -8, 7).astype(np.int16) + 8
+    Wf = q.reshape(N, K).astype(np.uint8)                                     # field 0..15
+    s_bf = f32_to_bf16_u16(s)                                                 # [N, K/256] u16
+    nlt_col = N // LT_N
+    nlt = (K // LT_K) * nlt_col
+    B = np.zeros((nlt, 4352), dtype=np.uint8)
+    idx = 0
+    for cm in range(NCOL):
+        for lt_col in range(cm, nlt_col, NCOL):
+            for ltr in range(K // LT_K):
+                blk = Wf[lt_col*LT_N:(lt_col+1)*LT_N, ltr*LT_K:(ltr+1)*LT_K].T.copy()  # [k,n]
+                blk = blk.reshape(16, 8, 8, 8).transpose(0, 2, 1, 3)          # [str,stc,i,j]
+                pairs = blk.reshape(16, 8, 8, 4, 2)
+                B[idx, :4096] = (pairs[..., 0] | (pairs[..., 1] << 4)).reshape(-1)
+                # scale：该大瓦片 k 范围 = 我们 256-sb 的 kt/2
+                sb = (ltr * LT_K) // 256
+                B[idx, 4096:4224] = np.ascontiguousarray(s_bf[lt_col*LT_N:(lt_col+1)*LT_N, sb]).view(np.uint8)
+                B[idx, 4224:4352] = 8   # zp = 8（对称量化 field−8）
+                idx += 1
+    return B.reshape(-1).tobytes()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", default=r"D:\xdna_llm\models\Ornith-1.5-35B-A3B")
@@ -123,15 +155,24 @@ def main():
     entries.sort(key=lambda e: e[0])   # 目录按 name 排序（不变量）
     print(f"{len(entries)} dir entries (from {len(names)} tensors)")
 
-    # 布局
+    # 布局：仅 (N,K)=(8192,2048) 密集张量（in_proj_qkv / q_proj，每 token 40 次调用
+    # 同形状零切换）→ TileFuse 预平铺 + NPU；其余 XBF4/XBF2 行主序（CPU vnni4/vnni2
+    # 快速路径不变）。flags bit0=预平铺。（保留字节 offset7 复用，已向主线报告）
+    # 取证：xclbin 切换 2.6ms/次（bench_switch.exe），多形状交替把 decode 拖到 600ms/token。
     data_off = 0
     for e in entries:
         sch = e[1]; shape = e[2]
         nel = int(np.prod(shape))
-        psz = {SCHEME_BF16: nel * 2, SCHEME_F32: nel * 4,
-               SCHEME_XBF4: (nel // BLK) * 130, SCHEME_XBF2: (nel // BLK) * 66}[sch]
+        is_expert = ".experts." in e[0]
+        pretiled = (sch == SCHEME_XBF4 and not is_expert and len(shape) == 2
+                    and tuple(shape) == (8192, 2048))
+        if sch == SCHEME_BF16: psz = nel * 2
+        elif sch == SCHEME_F32: psz = nel * 4
+        elif sch == SCHEME_XBF4 and pretiled: psz = (shape[1] // 128) * (shape[0] // 64) * 4352
+        elif sch == SCHEME_XBF4: psz = (nel // BLK) * 130
+        else: psz = (nel // BLK) * 66
         data_off = (data_off + 255) & ~255
-        e += [psz, data_off]
+        e += [psz, data_off, 1 if pretiled else 0]
         data_off += psz
 
     pool = bytearray()
@@ -150,22 +191,28 @@ def main():
         f.write(struct.pack("<QQQQQ", len(entries), dir_off, meta_off, len(meta_json), data_start))
         f.write(struct.pack("<Q", 1))
         f.write(b"\0" * 40)
-        for (nn, sch, shape, orig, ei, psz, doff, noff) in entries:
+        for (nn, sch, shape, orig, ei, psz, doff, flags, noff) in entries:
             sh = list(shape) + [1] * (4 - len(shape))
-            f.write(struct.pack("<IBBBB", noff, sch, 1, len(shape), 0))
+            f.write(struct.pack("<IBBBB", noff, sch, 1, len(shape), flags))
             f.write(struct.pack("<4Q", *sh))
             f.write(struct.pack("<QQQ", doff, psz, 0))
             f.write(b"\0" * 32)
         f.write(bytes(pool))
         f.write(meta_json)
         f.write(b"\0" * (data_start - f.tell()))
-        for i, (nn, sch, shape, orig, ei, psz, doff, noff) in enumerate(entries):
+        for i, (nn, sch, shape, orig, ei, psz, doff, flags, noff) in enumerate(entries):
             f.write(b"\0" * (data_start + doff - f.tell()))
             w = mr.read(orig) if ei is None else mr.read(orig, (ei,))
             if sch == SCHEME_BF16:
                 f.write(f32_to_bf16_u16(w).tobytes())
             elif sch == SCHEME_F32:
                 f.write(np.ascontiguousarray(w, dtype=np.float32).tobytes())
+            elif sch == SCHEME_XBF4 and flags:
+                try:
+                    f.write(pack4_pretiled(w.astype(np.float32)))
+                except Exception as ex:
+                    print("PRETILE FAIL on", nn, "shape", w.shape, ":", ex, flush=True)
+                    raise
             else:
                 f.write((quant_pack4 if sch == SCHEME_XBF4 else quant_pack2)(
                     w.reshape(-1, shape[-1]).astype(np.float32)))

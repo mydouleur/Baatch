@@ -60,3 +60,32 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
 - `ref_layer.py` / `ref_attn.py` — 单层 numpy 参考（多 token 递归，--x-embed 真输入）
 - `ref_full.py` / `hf_probe.py` / `hf_hooks.py` / `hf_gdn_hooks.py` — 全模型参考 /
   HF 逐层与逐子模块 hook 抓取（torch CPU 版 transformers 已装在本机）
+
+## M3'-b 现状（2026-10-24，进行中）：NPU W4A8 进密集路径
+
+- **NPU 后端**（`src/engine/npu.h`）：XRT 直调，形状库 `models/npu/k{K}n{N}.xclbin/.insts.bin`
+  （本机全链 15s/个：1.4.4 python 出 MLIR → RAI 编好的 i8 kernel .o → aiecc.exe + xclbinutil）。
+  密集预平铺张量（flags bit0）自动分发 NPU；flake（整块 0）校验+重试≤3+计数；
+  run 超时（ERT timeout）= 挂起语义，不重试直接 CPU 兜底。
+- **布局**：v1.1 容器 = 密集 XBF4 TileFuse 预平铺（zp=8 常数 ≡ 对称量化）+
+  专家行主序 XBF2/XBF4；目录 offset7 保留字节复用为 layout flags（bit0=预平铺）
+  ——**规范出入已报主线**（BAA_FORMAT.md 未定义该字节的此用途）。
+- **形状库**（4 个，全部上机逐位 PASS）：
+  k2048n8192（qkv/q_proj）、k2048n4096（z）、k4096n2048（out/o_proj）、k512n2048（shexp down）。
+  每调用地板 ~0.1ms（小形状）/~0.26ms（8.5MB）。
+- **留 CPU**：k/v_proj、in_proj_a/b、router、shexp gate/up、norm、SSM、embed、
+  lm_head（N=248320 不被 32 整除，不适配设计）、全部专家（XBF2/XBF4 行主序）。
+- CPU 兜底：`cpu_mv_pretiled`（标量反解，仅 fallback/对拍用）。
+- **混合 decode 已端到端跑通**（per-shape xclbin 版）：3450 次 NPU 调用、**flake=0**、
+  首 token `<think>` 与 HF 一致；但 **600ms/token 不达标**，归因：
+  (a) xclbin 切换 2.6ms/次 × 每 token 160 次形状交替（bench_switch.exe 实测：
+  同形状连跑 0.43ms/call vs 交替 5.8ms/对）；
+  (b) 预平铺密集张量的 CPU 兜底当时是标量慢路径。
+- **事故记录**："单 xclbin + insts 热换"优化（4 形状 design.pdi 逐位一致所以理论可行）
+  实测**挂死设备**（NPU 驱动僵尸态，进程不可杀，需重启恢复）——已回退，禁再用。
+- **当前定案**（v1.2，待设备恢复后复测）：writer 只把 (8192,2048) 的
+  in_proj_qkv/q_proj 预平铺（每 token 40 次同形状调用、**零切换**）；其余密集
+  张量回行主序走 CPU vnni4 快路径。models/ornith35_xbf24.baa 需按 v1.2 重打包
+  （写时被僵尸进程锁文件阻塞——重启后重跑 baa_writer_v1.py）。
+- 残余：flake 率实测（本进程 3450 运行 0 次，与 rai_explore 的 10-13% 口径不同——
+  疑似与其 i8 kernel 快时序相关，我们引擎调用间隔长得多）。

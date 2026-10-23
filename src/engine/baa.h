@@ -15,7 +15,8 @@
 #endif
 
 struct BaaTensor {
-  uint8_t scheme;      // 0=BF16 1=INT8 2=XBF3
+  uint8_t scheme;      // 0=BF16 1=INT8 2=XBF3 3=XBF4 4=XBF2 5=F32
+  uint8_t flags;       // bit0 = TileFuse 预平铺（NPU 去向）
   uint8_t ndim;
   uint64_t shape[4];
   const uint8_t* data; // mmap 指针
@@ -66,7 +67,7 @@ struct Baa {
       const uint8_t* e = dir + 96 * i;
       uint32_t noff; memcpy(&noff, e, 4);
       BaaTensor t;
-      t.scheme = e[4]; t.ndim = e[6];
+      t.scheme = e[4]; t.flags = e[7]; t.ndim = e[6];
       memcpy(t.shape, e + 8, 32);
       uint64_t doff, psz;
       memcpy(&doff, e + 40, 8); memcpy(&psz, e + 48, 8);

@@ -32,6 +32,7 @@ int main(int argc, char** argv) { try {
   int n_gen = 0;
   std::string ids_str;
   std::string probe_dir;
+  std::string npu_dir;
   for (int i = 1; i < argc; i++) {
     std::string s = argv[i];
     if (s == "--baa") baa = argv[++i];
@@ -41,9 +42,12 @@ int main(int argc, char** argv) { try {
     else if (s == "--ids") ids_str = argv[++i];
     else if (s == "--n") n_gen = atoi(argv[++i]);
     else if (s == "--probe") probe_dir = argv[++i];
+    else if (s == "--npu-dir") npu_dir = argv[++i];
   }
   Model m;
   m.open(baa);
+  NpuBackend npu;
+  if (!npu_dir.empty()) { npu.init(npu_dir); m.npu = &npu; fprintf(stderr, "npu backend on: %s\n", npu_dir.c_str()); }
   fprintf(stderr, "baa loaded: %zu tensors\n", m.baa.names.size());
 
   if (test_layer >= 0 && test_layer < 1000) {

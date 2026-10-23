@@ -3,6 +3,7 @@
 #include "baa.h"
 #include "kernels.h"
 #include "kernels_xbf.h"
+#include "npu.h"
 #include <vector>
 #include <string>
 
@@ -25,6 +26,8 @@ namespace Cfg {
   constexpr int VOCAB = 248320;
 }  // namespace Cfg
 
+static void cpu_mv_pretiled(const BaaTensor& t, const float* x, float* y);
+
 struct GdnState {
   std::vector<float> conv;   // (CONV_K-1) × QKV_DIM
   std::vector<float> ssm;    // VH × HD × HD
@@ -44,6 +47,7 @@ static inline std::string LN(int l, const char* suffix) {
 struct Model {
   Baa baa;
   Pool pool;
+  NpuBackend* npu = nullptr;   // 挂载则密集预平铺张量走 NPU
   std::vector<float> xq_buf_f;                 // 激活量化暂存
   std::vector<int8_t> xq;
   std::vector<float> sumxq;
@@ -56,7 +60,18 @@ struct Model {
   std::vector<int8_t> xe, xo, xq4;
   // GEMV 包装：按 scheme 分发（0=BF16 5=F32 3=XBF4 4=XBF2）
   void mv(const BaaTensor& w, const float* x, float* y) {
+    mv_named(w, "", x, y);
+  }
+  void mv_named(const BaaTensor& w, const std::string& name, const float* x, float* y) {
     int R = (int)w.shape[w.ndim - 2], C = (int)w.shape[w.ndim - 1];
+    if (w.scheme == 3 && (w.flags & 1) && npu && npu->ok) {
+      if (npu->gemv(w, x, y)) return;
+      // flake 重试耗尽/挂起 → CPU 兜底（需 CPU 读预平铺——见 npu 注记）
+      fprintf(stderr, "[npu] fallback CPU for %s\n", name.c_str());
+      cpu_mv_pretiled(w, x, y);
+      return;
+    }
+    if (w.scheme == 3 && (w.flags & 1)) { cpu_mv_pretiled(w, x, y); return; }
     if (w.scheme == 0) { gemv_bf16(pool, w.bf16(), R, C, x, y); return; }
     if (w.scheme == 5) { gemv_f32(pool, w.f32(), R, C, x, y); return; }
     xq.resize(C); sumxq.resize(C / XBF_SB);
@@ -92,6 +107,34 @@ struct Model {
     else rmsnorm(x, t.bf16(), n, y, Cfg::EPS, plus1);
   }
 };
+
+// CPU 读 TileFuse 预平铺 X4（fallback/对拍路径，非热路径）
+static void cpu_mv_pretiled(const BaaTensor& t, const float* x, float* y) {
+  int N = (int)t.shape[0], K = (int)t.shape[1];
+  for (int n = 0; n < N; n++) y[n] = 0.f;
+  const uint8_t* tiles = t.data;
+  int nlt_col = N / 64, idx = 0;
+  for (int cm = 0; cm < 8; cm++)
+    for (int lt_col = cm; lt_col < nlt_col; lt_col += 8)
+      for (int ltr = 0; ltr < K / 128; ltr++, idx++) {
+        const uint8_t* tp = tiles + (size_t)idx * 4352;
+        const uint8_t* wpk = tp;
+        const uint16_t* sc = (const uint16_t*)(tp + 4096);
+        for (int str = 0; str < 16; str++)
+          for (int stc = 0; stc < 8; stc++) {
+            const uint8_t* sp = wpk + (str * 8 + stc) * 32;
+            for (int i = 0; i < 8; i++)
+              for (int j = 0; j < 8; j += 2) {
+                uint8_t byte = sp[(i * 8 + j) / 2];
+                int k0 = ltr * 128 + str * 8 + i;
+                int n0 = lt_col * 64 + stc * 8 + j;
+                float s2 = bf16_to_f32(sc[stc * 8 + j]);
+                y[n0]     += ((int)(byte & 0xF) - 8) * s2 * x[k0];
+                y[n0 + 1] += ((int)(byte >> 4) - 8) * s2 * x[k0];
+              }
+          }
+      }
+}
 
 // ---------------- GDN decode（linear_attn，照 qwen35moe/delta-net decode 数学） ----------------
 static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* xout) {
