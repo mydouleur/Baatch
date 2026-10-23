@@ -29,7 +29,7 @@ Baatch 引擎的模型容器。厂商中立；量化方案由方案 tag 标识�
 | 偏移 | 字段 | 说明 |
 |---|---|---|
 | 0 | name_offset | u32，名字符串池偏移 |
-| 4 | scheme | u8：0=BF16 原样，1=INT8，2=XBF3，3=XBF4 |
+| 4 | scheme | u8：0=BF16 原样，1=INT8，2=XBF3，3=XBF4，4=XBF2，5=F32 原样 |
 | 5 | dtype_hint | u8：原始逻辑类型 |
 | 6 | ndim | u8 |
 | 7 | 保留 | u8 |
@@ -54,6 +54,20 @@ superblock(256 权重) = [2B BF16 scale][96B 位平面数据]
 superblock(256) = [2B BF16 scale][128B nibble 数据]（lo|hi<<4 字节内打包）
 布局兼容 TileFuse 预平铺（NPU 路径）；CPU 路径行主序
 ```
+
+## XBF2 张量数据（2.0625 bpw）
+
+```
+superblock(256) = [2B BF16 scale][64B 位平面数据]
+位平面：2 × 32B（P0/P1，q = b0 + 2b1 编码，CPU vnni LUT kernel 的 vpmultishiftqb 布局）
+行起始 64B 对齐
+量化工艺：imatrix 加权舍入（组内 scale 小网格搜索最小化加权误差）+ Hadamard 预旋转（旋转矩阵经 aux_offset 引用）
+```
+
+## 专家粒度位宽（v1+ 不变量）
+
+- 路由专家张量（`ffn_*_exps`）在 .baa 内**按专家子块存储**，每个专家子块带独立 scheme 字节；引擎分发禁止按层假设统一位宽
+- 冷/热配比是打包期决策，容器与引擎均无感知；改配比 = 重打包 + 改 NPU/CPU 归属表，引擎代码不动
 
 ## 不变量
 

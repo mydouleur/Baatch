@@ -134,3 +134,52 @@ Backend：
 - **已评审并弃用**：T-MAN 表查找（XBF3 均匀量化无码本稀疏性可利用，AIE2P select 实测贵）；PMPD 渐进精度（与 MTP 同轴，MTP 更便宜）；AIE2P 编译期 LUT（仅常量表，对均匀量化无意义）
 - **思路 1（3-bit NPU decode kernel）封存入档**：终审判决——3-bit 与 AIE2P 车道结构性错配（v1–v7 七版实测，0.57 GB/s 真实计算封顶；修正版双 2-bit 平面 修法B：q=3u₂+u₁−4 见 kernels/xbf3_gemv/README.md）。重启条件：①M3' 实测 decode 明确 CPU 侧瓶颈且有带宽余量；②必须吸收 TileFuse memcore 2D 分发 + 加宽微内核；③现实预期 ~10–15 GB/s（插件级，非主力）
 - **方案 4（热冷混合精度：热专家 4-bit→NPU / 冷专家 3-bit→CPU）封存入档**（2026-10-22 用户决定）：内存账已算清——静态按专家分配不复制存储，热占比 25%/50% 时总体积 +1.0/+1.8 GB（32GB 机仍宽松）；质量 ≥ 方案 A（热专家升精度）；风险在静态分配对分布漂移的鲁棒性（正确性无损，性能降）。重启条件：**仅由用户显式提出时重启**（2026-10-22 用户改），不设自动触发条件
+
+## 10. v1 定案（2026-10-24）：XBF24 配比 + NPU/CPU 混合 decode
+
+### 10.1 NPU 解锁实证（m0/probe/rai_explore/REPORT.md）
+
+- **Peano bug 绕过成功**：W4A8 int16 VMAC kernel（vm_mix_int4_64x8_i8.cc）全部数值测试逐位 PASS（原 bf16 bug 触发集 ±5/±7、k%16 脉冲、随机满谱，4096/8192 两档）。方法：int 域解包 → int16×int16 MAC 进 acc32 → 尾段 fp32 乘 group scale；关键陷阱：多活跃 512-bit 向量触发 Peano spill bug（交织单活跃向量版修复）；硬件 acc→bf16 是 **floor 舍入**（对拍参考必须按 floor 模拟）
+- **带宽**：8192 真 DRAM 流 max 43.6 / avg 41.2 GB/s（0a 基线 +48%）。**本机纯读上限实测 ~51 GB/s**（1ch 48.7 → 2ch 51.3，+5%；瓶颈在共享 NoC/DRAM 读路径，非每列通道数；1.4.4 工具链已自动分双通道）。55 验收线物理上不可达（唯一未试结构：32MB 长 BD 手写 txn 层，留档）
+- **本地 15 秒迭代全链打通**：RAI clang21 + mlir_aie 1.4.4 win wheel aiecc.exe + xclbinutil + XRT，不再依赖 CI 往返
+- 已知瑕疵：~10–13% 运行间歇输出整块为 0（flake，疑似时序假设，生产化前必修）；带宽测量须带 checksum 隔离 flake 样本
+- License：开发期用 RAI 编译器类比 MSVC 可行；出货工具链用 llvm-aie 上游公开版（Apache-2.0+LLVM-exception）
+
+### 10.2 XBF24 量化结构（v1 出货规格）
+
+| 部件 | 位宽 | 体积 |
+|---|---|---|
+| 路由专家·核心层 10–29（20 层） | **XBF2**（2-bit，imatrix 加权舍入 + Hadamard 旋转） | ~4.2GB |
+| 路由专家·边缘层 0–9/30–39（20 层） | **XBF4** | ~8.2GB |
+| 共享专家 shexp ×120 | XBF4 | ~64MB |
+| 线性注意力 qkv/gate/ssm_out ×30 | XBF4 | ~440MB |
+| 全注意力 q/k/v/out ×10 | XBF4 | ~140MB |
+| embedding + 输出头 | XBF4（输出头备选升 6-bit） | ~516MB |
+| 路由器 ×82 | F32 不压 | ~84MB |
+| SSM 递推参数 + 全部 norm | F32 不压 | ~17MB |
+| MTP 层 | 专家 XBF4 + 密集 XBF4 + 路由 BF16 | ~400MB |
+| **合计** | | **≈14GB** |
+
+量化工艺：专家量化全部用 **Tiel 公开 imatrix 加权**（`models/tiel_imatrix.gguf`，4900 万字符代码语料校准，MIT；imatrix 是量化时原料，推理时不在场）。
+
+### 10.3 v1 引擎分工（NPU 主力 + CPU 辅助）
+
+- **NPU（密集路径）**：attn/shexp/embedding/输出头/路由器前向，~1.0GB/token @ 43.6 GB/s ≈ 23ms
+- **CPU 2 大核（专家路径）**：路由专家 XBF2/XBF4 LUT GEMV，~0.39GB/token @ 39 GB/s ≈ 10ms；余量吸收 MTP 草案前向（~1ms×3）与长上下文 KV 读
+- 并行瓶颈 ~23ms → **裸 ~43 tok/s**，×MTP（社区实测接受率 84%，n=3）有效 ~90+ tok/s
+- MTP 走同一套切分：验证前向 = NPU 密集 + CPU 专家（权重只读一遍验证 3 个）；草案头 = 第 41 层，CPU 余量内跑
+- 配平旋钮：输出头 GEMV（258MB）为边界张量，可在 NPU/CPU 间迁移
+
+### 10.4 版本边界（用户 2026-10-24 定）
+
+- **v1**：上述混合引擎走通即可，NPU 40 GB/s 接受
+- **v2+ 储备**（均不在 v1）：flake 修复与 GEMV 生产化、并发带宽实测配平速查表、CPU/NPU 算子优化、模型配比迭代（PPL 门扫参）、激进量化（B 档）
+- **设计约束（为 v2 伏笔）**：引擎专家分发必须**按专家粒度读 dtype 标志**，禁止按层假设统一位宽（保住 vs GGUF 阵营的专家粒度独有牌）；同一张量 NPU/CPU 两侧共用同一磁盘格式（避免双份打包）
+- serve 层默认（来自 Tiel 社区教训）：代码场景 repeat_penalty=1.0、presence/frequency=0、temp 0.6、min_p 0.05、--jinja；低量化档 thinking 循环用 DRY sampling
+- MTP 头必须用修复版（shisa-ai 发布的 fixed heads；Tiel 历史 issue #3 前科），打包时做接受率对拍
+
+### 10.5 社区情报备忘（2026-10-23 调查）
+
+- Tiel UD-IQ3_XXS（13.2GB）：路由器 F32、shexp Q6_K、线性/全注意力 Q6_K、路由专家 gate/up **全层 IQ2_S** + down IQ3_XXS——专家 gate/up 全层 2-bit 可用性已获其社区验证
+- APEX-I-MiniPlus V2.1（15.2GB，ΔPPL +0.93%）：核心层 IQ3_XXS/边缘 Q3_K、shexp Q5_K；其前作有**循环状态不稳定/上下文退化**前科（作者 V3 卡自认）→ 我们不压密集路径到 3-bit 的决策依据
+- Tiel 社区前科：UD-Q8_K_XL 疑似坏档（#19，高 bpw ≠ 质量好，每档出货须冒烟）；sock-puppet 幻觉为 Ornith 1.5 基座行为（#11），非量化问题
