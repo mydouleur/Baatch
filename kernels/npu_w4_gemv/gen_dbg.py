@@ -59,10 +59,11 @@ def main():
     if len(neq):
         for l in neq[:8]:
             print(f"   lane {l}: got {got1[l]} exp {exp1[l]}  (tile {l//64}, row {(l%64)//8}, col {l%8})")
-    # st2 期望 = st1 − zp（zp 车道序按 grow_replicate([z8,z8])×4 = lane l → z[l%8]）
-    zlane = np.tile(np.repeat(exp_z, 2), 2)          # [z0,z0,...z7,z7] ×2 = 32? 实际 grow_replicate<64>(16)=16×4
-    zlane = np.concatenate([np.repeat(exp_z, 2)] * 4)  # 64
-    exp2 = (exp1.astype(np.int16) - np.tile(zlane, 128)).astype(np.int8)
+    # st2 期望 = st1 − zp；车道序：tile t=(i,j) lane l → zp[j*8 + l%8]
+    t_idx = np.arange(128 * 64) // 64
+    l_idx = np.arange(128 * 64) % 64
+    zp_lane = exp_z[(t_idx % 8) * 8 + (l_idx % 8)]
+    exp2 = (exp1.astype(np.int16) - zp_lane).astype(np.int8)
     neq2 = np.nonzero(got2 != exp2)[0]
     print("== st2 (sub zp, 假设 lane l→z[l%8]):", len(neq2), "mismatch", neq2[:10])
     # st3 期望 = bf16(st2) × s

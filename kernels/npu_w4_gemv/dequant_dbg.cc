@@ -9,7 +9,7 @@
 
 extern "C" void dequant_dbg(const int8_t* __restrict b,
                             uint8_t* __restrict outA,   // [0]=st1 u8, [8192]=st2 i8
-                            bfloat16* __restrict st3) {
+                            bfloat16* __restrict st3) {  // [0..8192)=st3, [8192..)=st4 重组行
   uint8_t* st1 = outA;
   int8_t* st2 = (int8_t*)(outA + 8192);
   const unsigned colA = 16, colB = 8, size_B = 64;
@@ -36,5 +36,17 @@ extern "C" void dequant_dbg(const int8_t* __restrict b,
       const auto B_scaled = aie::mul(B_dequantized, Bs_replicated);
       aie::store_v(st3 + (i * colB + j) * size_B, B_scaled.template to_vector<bfloat16>());
     }
+  }
+  // st4：VM 内核 MAC 的 b 行重组路径原样（vshift/concat reload），逐行 dump；
+  // 重载源 = 刚写入的 st3 区域（免 dbg_bbuf，DM 预算）
+  for (unsigned row = 0; row < 128; row++) {
+    const bfloat16* b_ptr = st3 + (row >> 3) * 512;
+    const unsigned to = (row & 7) * 8;
+    const aie::vector<bfloat16, 64> b_row = aie::concat(
+        aie::load_v<8>(b_ptr + 0 * 64 + to), aie::load_v<8>(b_ptr + 1 * 64 + to),
+        aie::load_v<8>(b_ptr + 2 * 64 + to), aie::load_v<8>(b_ptr + 3 * 64 + to),
+        aie::load_v<8>(b_ptr + 4 * 64 + to), aie::load_v<8>(b_ptr + 5 * 64 + to),
+        aie::load_v<8>(b_ptr + 6 * 64 + to), aie::load_v<8>(b_ptr + 7 * 64 + to));
+    aie::store_v(st3 + 8192 + row * 64, b_row);
   }
 }

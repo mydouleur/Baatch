@@ -33,10 +33,10 @@ int main(int argc, char** argv) {
     xrt::bo bi(dev, instr.size(), XCL_BO_FLAGS_CACHEABLE, kernel.group_id(1));
     xrt::bo b0(dev, inp.size(), XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(3));
     xrt::bo b1(dev, 16384, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(4));
-    xrt::bo b3(dev, 16384, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(5));
+    xrt::bo b3(dev, 32768, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(5));
     memcpy(bi.map(), instr.data(), instr.size());
     memcpy(b0.map(), inp.data(), inp.size());
-    memset(b1.map(), 0xEE, 16384); memset(b3.map(), 0xEE, 16384);
+    memset(b1.map(), 0xEE, 16384); memset(b3.map(), 0xEE, 32768);
     bi.sync(XCL_BO_SYNC_BO_TO_DEVICE); b0.sync(XCL_BO_SYNC_BO_TO_DEVICE);
     xrt::run run{kernel};
     run.set_arg(0, 3); run.set_arg(1, bi); run.set_arg(2, (unsigned)(instr.size() / 4));
@@ -45,7 +45,7 @@ int main(int argc, char** argv) {
     b1.sync(XCL_BO_SYNC_BO_FROM_DEVICE); b3.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
     { std::ofstream f(prefix + ".st1.bin", std::ios::binary); f.write((char*)b1.map(), 8192); }
     { std::ofstream f(prefix + ".st2.bin", std::ios::binary); f.write((char*)b1.map() + 8192, 8192); }
-    { std::ofstream f(prefix + ".st3.bin", std::ios::binary); f.write((char*)b3.map(), 16384); }
+    { std::ofstream f(prefix + ".st3.bin", std::ios::binary); f.write((char*)b3.map(), 32768); }
     printf("OK dumped %s.st{1,2,3}.bin\n", prefix.c_str());
     return 0;
   } catch (const std::exception& e) { fprintf(stderr, "ERROR: %s\n", e.what()); return 2; }

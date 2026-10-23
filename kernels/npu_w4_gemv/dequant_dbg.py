@@ -13,7 +13,7 @@ from aie.utils.hostruntime.cli import run_design_cli
 
 in_ty = np.ndarray[(4352,), np.dtype[np.int8]]
 stA_ty = np.ndarray[(16384,), np.dtype[np.uint8]]   # st1(8KB) + st2(8KB)
-st3_ty = np.ndarray[(8192,), np.dtype[bfloat16]]
+st3_ty = np.ndarray[(16384,), np.dtype[bfloat16]]
 
 
 @jit
