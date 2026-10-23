@@ -19,7 +19,7 @@ NE, TOPK, MI = 256, 8, 512
 EPS = 1e-6
 
 def rmsnorm(x, w, eps=EPS):
-    return x / np.sqrt((x ** 2).mean() + eps) * w
+    return x / np.sqrt((x ** 2).mean() + eps) * (1 + w)   # qwen3_5 零中心 RMSNorm
 
 def sigmoid(x): return 1 / (1 + np.exp(-x))
 def silu(x): return x * sigmoid(x)
@@ -60,8 +60,8 @@ def main():
             q = q / np.sqrt(HD)
             o = np.zeros(VAL_DIM, dtype=np.float32)
             for j in range(VH):
-                kj = k[(j % KH) * HD:(j % KH + 1) * HD]
-                qj = q[(j % KH) * HD:(j % KH + 1) * HD]
+                kj = k[(j // (VH // KH)) * HD:(j // (VH // KH) + 1) * HD]
+                qj = q[(j // (VH // KH)) * HD:(j // (VH // KH) + 1) * HD]
                 vj = v[j * HD:(j + 1) * HD]
                 s = np.outer(vj * beta[j], kj)     # 零状态：s = d ⊗ k
                 o[j * HD:(j + 1) * HD] = s @ qj
@@ -75,9 +75,9 @@ def main():
             gate = qg[:, AHD:]
             kk = T("self_attn.k_proj.weight") @ xn
             vv = T("self_attn.v_proj.weight") @ xn
-            q = q / np.sqrt((q ** 2).mean(axis=-1, keepdims=True) + EPS) * T("self_attn.q_norm.weight")
+            q = q / np.sqrt((q ** 2).mean(axis=-1, keepdims=True) + EPS) * (1 + T("self_attn.q_norm.weight"))
             kk = kk.reshape(KVH, AHD)
-            kk = kk / np.sqrt((kk ** 2).mean(axis=-1, keepdims=True) + EPS) * T("self_attn.k_norm.weight")
+            kk = kk / np.sqrt((kk ** 2).mean(axis=-1, keepdims=True) + EPS) * (1 + T("self_attn.k_norm.weight"))
             # pos=0 → rope 恒等；KV cache 只有本 token → 注意力输出 = v（按头）
             out = np.zeros((QH, AHD), dtype=np.float32)
             for h in range(QH):

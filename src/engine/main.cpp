@@ -81,7 +81,7 @@ int main(int argc, char** argv) { try {
     for (int tok : pids) {
       { const uint16_t* e = emb.bf16() + (size_t)tok * Cfg::H;
         for (int i = 0; i < Cfg::H; i++) x[i] = bf16_to_f32(e[i]); }
-      bool last = (npos == (int)pids.size() - 1);
+      bool last = (npos == 0);   // 首 token（零状态，直接可比）
       for (int l = 0; l < Cfg::NLAYERS; l++) {
         if (m.is_gdn(l)) gdn_decode(m, l, gst[l], x.data(), x2.data());
         else attn_decode(m, l, ast[l], npos, x.data(), x2.data());
@@ -144,7 +144,7 @@ int main(int argc, char** argv) { try {
         else attn_decode(m, l, ast[l], pos, x.data(), x2.data());
         moe(m, l, x2.data(), x.data());
       }
-      rmsnorm(x.data(), fnorm.bf16(), Cfg::H, x.data());
+      rmsnorm(x.data(), fnorm.bf16(), Cfg::H, x.data(), Cfg::EPS, true);
       m.mv(lmh, x.data(), logits.data());
       next = (int)(std::max_element(logits.begin(), logits.end()) - logits.begin());
       auto t1 = std::chrono::steady_clock::now();

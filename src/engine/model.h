@@ -77,7 +77,7 @@ struct Model {
 static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* xout) {
   using namespace Cfg;
   std::vector<float> xn(H), qkv(QKV_DIM), z(VAL_DIM), beta(VH), alpha(VH);
-  rmsnorm(xin, m.T(LN(l, "input_layernorm.weight")).bf16(), H, xn.data());
+  rmsnorm(xin, m.T(LN(l, "input_layernorm.weight")).bf16(), H, xn.data(), Cfg::EPS, true);
   m.mv(m.T(LN(l, "linear_attn.in_proj_qkv.weight")), xn.data(), qkv.data());
   m.mv(m.T(LN(l, "linear_attn.in_proj_z.weight")), xn.data(), z.data());
   m.mv(m.T(LN(l, "linear_attn.in_proj_b.weight")), xn.data(), beta.data());
@@ -122,8 +122,8 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
   std::vector<float> o(VAL_DIM, 0.f);
   for (int j = 0; j < VH; j++) {
     float* s = st.ssm.data() + (size_t)j * HD * HD;
-    const float* kj = k + (j % KH) * HD;
-    const float* qj = q + (j % KH) * HD;
+    const float* kj = k + (j / (VH / KH)) * HD;
+    const float* qj = q + (j / (VH / KH)) * HD;
     const float* vj = v + j * HD;
     float decay = expf(g[j]);
     float sk[HD], d[HD];
@@ -166,7 +166,7 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
 static void attn_decode(Model& m, int l, AttnState& st, int pos, const float* xin, float* xout) {
   using namespace Cfg;
   std::vector<float> xn(H), qg(QPROJ), kk(KVH * AHD), vv(KVH * AHD);
-  rmsnorm(xin, m.T(LN(l, "input_layernorm.weight")).bf16(), H, xn.data());
+  rmsnorm(xin, m.T(LN(l, "input_layernorm.weight")).bf16(), H, xn.data(), Cfg::EPS, true);
   m.mv(m.T(LN(l, "self_attn.q_proj.weight")), xn.data(), qg.data());
   m.mv(m.T(LN(l, "self_attn.k_proj.weight")), xn.data(), kk.data());
   m.mv(m.T(LN(l, "self_attn.v_proj.weight")), xn.data(), vv.data());
@@ -177,13 +177,13 @@ static void attn_decode(Model& m, int l, AttnState& st, int pos, const float* xi
     float* p = qg.data() + h * 2 * AHD;
     float ss = 0; for (int i = 0; i < AHD; i++) ss += p[i] * p[i];
     float inv = 1.f / sqrtf(ss / AHD + EPS);
-    for (int i = 0; i < AHD; i++) p[i] = p[i] * inv * bf16_to_f32(qnw[i]);
+    for (int i = 0; i < AHD; i++) p[i] = p[i] * inv * (1.f + bf16_to_f32(qnw[i]));
   }
   for (int h = 0; h < KVH; h++) {
     float* p = kk.data() + h * AHD;
     float ss = 0; for (int i = 0; i < AHD; i++) ss += p[i] * p[i];
     float inv = 1.f / sqrtf(ss / AHD + EPS);
-    for (int i = 0; i < AHD; i++) p[i] = p[i] * inv * bf16_to_f32(knw[i]);
+    for (int i = 0; i < AHD; i++) p[i] = p[i] * inv * (1.f + bf16_to_f32(knw[i]));
   }
   // RoPE：前 ROPE_DIM 维，theta 1e7，interleaved（mrope_interleaved=true）
   auto rope = [&](float* vec, int nheads) {
@@ -240,7 +240,7 @@ static void attn_decode(Model& m, int l, AttnState& st, int pos, const float* xi
 static void moe(Model& m, int l, const float* xin, float* xout) {
   using namespace Cfg;
   std::vector<float> xn(H);
-  rmsnorm(xin, m.T(LN(l, "post_attention_layernorm.weight")).bf16(), H, xn.data());
+  rmsnorm(xin, m.T(LN(l, "post_attention_layernorm.weight")).bf16(), H, xn.data(), Cfg::EPS, true);
   std::vector<float> logits(NE);
   m.mv(m.T(LN(l, "mlp.gate.weight")), xn.data(), logits.data());
   // softmax → top8 → 归一化

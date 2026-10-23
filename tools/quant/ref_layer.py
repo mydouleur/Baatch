@@ -18,7 +18,7 @@ NE, TOPK, MI = 256, 8, 512
 EPS = 1e-6
 
 def rmsnorm(x, w, eps=EPS):
-    return x / np.sqrt((x ** 2).mean() + eps) * w
+    return x / np.sqrt((x ** 2).mean() + eps) * (1 + w)   # qwen3_5 零中心 RMSNorm
 
 def sigmoid(x): return 1 / (1 + np.exp(-x))
 def silu(x): return x * sigmoid(x)
@@ -31,6 +31,7 @@ def main():
     ap.add_argument("--layer", type=int, default=0)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--ntok", type=int, default=1)
+    ap.add_argument("--x-embed", type=int, default=None, help="用 embed[token] 作输入（真实输入对拍 HF）")
     ap.add_argument("--skip-moe", action="store_true")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -40,6 +41,8 @@ def main():
 
     rng = np.random.default_rng(a.seed)
     xs = rng.standard_normal((a.ntok, H)).astype(np.float32)
+    if a.x_embed is not None:
+        xs[0] = mr.read("model.language_model.embed_tokens.weight", (a.x_embed,)).astype(np.float32)
 
     def T(n): return mr.read(P + n)
 
@@ -79,8 +82,8 @@ def main():
 
         o = np.zeros(VAL_DIM, dtype=np.float32)
         for j in range(VH):
-            kj = k[(j % KH) * HD:(j % KH + 1) * HD]
-            qj = q[(j % KH) * HD:(j % KH + 1) * HD]
+            kj = k[(j // (VH // KH)) * HD:(j // (VH // KH) + 1) * HD]
+            qj = q[(j // (VH // KH)) * HD:(j // (VH // KH) + 1) * HD]
             vj = v[j * HD:(j + 1) * HD]
             s = ssm[j]
             s *= np.exp(g[j])
@@ -92,6 +95,8 @@ def main():
         og = og / np.sqrt((og ** 2).mean(axis=-1, keepdims=True) + EPS) * nw
         og = (og * silu(z.reshape(VH, HD))).reshape(-1)
         y_gdn_all[t] = x + Wo @ og
+        if os.environ.get("RL_DBG"):
+            np.savez("rl_dbg.npz", xn=xn, qkv=qkv, qc=qc, o=o, og=og, y=x + Wo @ og, z=z, beta=beta, g=g)
 
     # MoE（对最后一个 token）
     x2 = rmsnorm(y_gdn_all[-1], T("post_attention_layernorm.weight"))

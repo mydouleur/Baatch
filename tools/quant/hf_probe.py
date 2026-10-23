@@ -17,7 +17,7 @@ with torch.no_grad():
 hs = out.hidden_states
 print("n hidden:", len(hs))
 for L in range(1, len(hs)):
-    v = hs[L][0, -1].float().numpy()
+    v = hs[L][0, 0].float().numpy()   # 首 token（零状态）
     v.tofile(os.path.join(outdir, f"ylayer_{L-1:02d}.bin"))
 logits = out.logits[0, -1]
 top = torch.topk(logits, 10)

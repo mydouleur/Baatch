@@ -150,11 +150,17 @@ static inline float quant_xq(const float* x, int n, int8_t* xq, float* sumxq) {
 }
 
 // ---------------- 小 ops（fp32） ----------------
-static inline void rmsnorm(const float* x, const uint16_t* w_bf, int n, float* y, float eps = 1e-6f) {
+// qwen3_5_moe 两种 RMSNorm：plus1=true → ×(1+w)（input/post/qk/final norm，零中心权重）；
+// plus1=false → ×w（GDN 输出门控 norm，ones 初始化权重）
+static inline void rmsnorm(const float* x, const uint16_t* w_bf, int n, float* y,
+                           float eps = 1e-6f, bool plus1 = false) {
   float ss = 0;
   for (int i = 0; i < n; i++) ss += x[i] * x[i];
   float inv = 1.f / sqrtf(ss / n + eps);
-  for (int i = 0; i < n; i++) y[i] = x[i] * inv * bf16_to_f32(w_bf[i]);
+  if (plus1)
+    for (int i = 0; i < n; i++) y[i] = x[i] * inv * (1.f + bf16_to_f32(w_bf[i]));
+  else
+    for (int i = 0; i < n; i++) y[i] = x[i] * inv * bf16_to_f32(w_bf[i]);
 }
 static inline float sigmoidf(float x) { return 1.f / (1.f + expf(-x)); }
 static inline float softplusf(float x) { return x > 20.f ? x : log1pf(expf(x)); }

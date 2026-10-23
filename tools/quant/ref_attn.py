@@ -17,7 +17,7 @@ NE, TOPK, MI = 256, 8, 512
 EPS = 1e-6
 
 def rmsnorm(x, w, eps=EPS):
-    return x / np.sqrt((x ** 2).mean() + eps) * w
+    return x / np.sqrt((x ** 2).mean() + eps) * (1 + w)   # qwen3_5 零中心 RMSNorm
 
 def sigmoid(x): return 1 / (1 + np.exp(-x))
 def silu(x): return x * sigmoid(x)
@@ -67,8 +67,8 @@ def main():
         qg = qg.reshape(QH, 2 * AHD)
         q = qg[:, :AHD].copy()
         gate = qg[:, AHD:]
-        q = q.reshape(QH, AHD) / np.sqrt((q.reshape(QH, AHD) ** 2).mean(axis=-1, keepdims=True) + EPS) * qnw
-        kk = kk.reshape(KVH, AHD) / np.sqrt((kk.reshape(KVH, AHD) ** 2).mean(axis=-1, keepdims=True) + EPS) * knw
+        q = q.reshape(QH, AHD) / np.sqrt((q.reshape(QH, AHD) ** 2).mean(axis=-1, keepdims=True) + EPS) * (1 + qnw)
+        kk = kk.reshape(KVH, AHD) / np.sqrt((kk.reshape(KVH, AHD) ** 2).mean(axis=-1, keepdims=True) + EPS) * (1 + knw)
         q = rope(q.reshape(-1), t, QH).reshape(QH, AHD)
         kk = rope(kk.reshape(-1), t, KVH).reshape(KVH, AHD)
         Ks[t], Vs[t] = kk.reshape(-1), vv
