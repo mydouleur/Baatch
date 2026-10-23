@@ -124,13 +124,16 @@ void vecmat_vectorized(T_in_A *__restrict a, T_in_B *__restrict b,
 #undef BVEC
 
         // 逐 lane 标量×向量 mac（aie::accumulate 变长形在 Peano 下对 |v|∈{5,7} 出错——
-        // dequant_dbg 分阶段 dump 证明 unpack/sub/cvt/reload 全对，唯 accumulate 可疑）
-        for (int t = 0; t < 8; t++) {
-          const aie::vector<T_in_A, four_r>& bv = t == 0 ? b_vec_0 : t == 1 ? b_vec_1 :
-              t == 2 ? b_vec_2 : t == 3 ? b_vec_3 : t == 4 ? b_vec_4 :
-              t == 5 ? b_vec_5 : t == 6 ? b_vec_6 : b_vec_7;
-          c_acc = aie::mac(c_acc, a_ptr[row + t], bv);
-        }
+        // dequant_dbg 分阶段 dump 证明 unpack/sub/cvt/reload 全对，唯 accumulate 可疑；
+        // 显式 8 行：三元参考链会被 Peano 编成跳表 j p2（上机挂起），必须展开）
+        c_acc = aie::mac(c_acc, a_ptr[row + 0], b_vec_0);
+        c_acc = aie::mac(c_acc, a_ptr[row + 1], b_vec_1);
+        c_acc = aie::mac(c_acc, a_ptr[row + 2], b_vec_2);
+        c_acc = aie::mac(c_acc, a_ptr[row + 3], b_vec_3);
+        c_acc = aie::mac(c_acc, a_ptr[row + 4], b_vec_4);
+        c_acc = aie::mac(c_acc, a_ptr[row + 5], b_vec_5);
+        c_acc = aie::mac(c_acc, a_ptr[row + 6], b_vec_6);
+        c_acc = aie::mac(c_acc, a_ptr[row + 7], b_vec_7);
 
         b_ptr += n * s;
         a_ptr += s;
