@@ -66,25 +66,34 @@ int main(int argc, char** argv) { try {
     printf("layer time: %.1f ms (last token)\n", std::chrono::duration<double>(t1 - t0).count() * 1e3);
     return 0;
   }
-  // ---------------- probe：单 token 逐层 dump（对拍 ref_full.py） ----------------
+  // ---------------- probe：整 prompt 逐层 dump 最后 token 的 hidden（对拍 HF） ----------------
   if (!probe_dir.empty() && !ids_str.empty()) {
-    int tok = atoi(ids_str.c_str());
+    std::vector<int> pids;
+    { size_t p = 0; while (p <= ids_str.size()) {
+        size_t c = ids_str.find(',', p);
+        pids.push_back(atoi(ids_str.substr(p, c == std::string::npos ? ids_str.size() : c - p).c_str()));
+        if (c == std::string::npos) break; p = c + 1; } }
     const BaaTensor& emb = m.T("embed_tokens");
     std::vector<GdnState> gst(Cfg::NLAYERS);
     std::vector<AttnState> ast(Cfg::NLAYERS);
     std::vector<float> x(Cfg::H), x2(Cfg::H);
-    { const uint16_t* e = emb.bf16() + (size_t)tok * Cfg::H;
-      for (int i = 0; i < Cfg::H; i++) x[i] = bf16_to_f32(e[i]); }
-    for (int l = 0; l < Cfg::NLAYERS; l++) {
-      if (m.is_gdn(l)) gdn_decode(m, l, gst[l], x.data(), x2.data());
-      else attn_decode(m, l, ast[l], 0, x.data(), x2.data());
-      moe(m, l, x2.data(), x.data());
-      char fn[256]; sprintf(fn, "%s/ylayer_%02d.bin", probe_dir.c_str(), l);
-      FILE* f = fopen(fn, "wb"); fwrite(x.data(), 4, Cfg::H, f); fclose(f);
-      float mx = 0; double ss = 0;
-      for (int i = 0; i < Cfg::H; i++) { mx = std::max(mx, fabsf(x[i])); ss += x[i]*x[i]; }
-      fprintf(stderr, "L%02d |x|max=%.4f rms=%.4f\n", l, mx, sqrt(ss/Cfg::H));
+    int npos = 0;
+    for (int tok : pids) {
+      { const uint16_t* e = emb.bf16() + (size_t)tok * Cfg::H;
+        for (int i = 0; i < Cfg::H; i++) x[i] = bf16_to_f32(e[i]); }
+      bool last = (npos == (int)pids.size() - 1);
+      for (int l = 0; l < Cfg::NLAYERS; l++) {
+        if (m.is_gdn(l)) gdn_decode(m, l, gst[l], x.data(), x2.data());
+        else attn_decode(m, l, ast[l], npos, x.data(), x2.data());
+        moe(m, l, x2.data(), x.data());
+        if (last) {
+          char fn[256]; sprintf(fn, "%s/ylayer_%02d.bin", probe_dir.c_str(), l);
+          FILE* f = fopen(fn, "wb"); fwrite(x.data(), 4, Cfg::H, f); fclose(f);
+        }
+      }
+      npos++;
     }
+    fprintf(stderr, "probe done: %d tokens dumped for last token\n", npos);
     return 0;
   }
   // ---------------- 全注意力层对拍（--test-attn N） ----------------

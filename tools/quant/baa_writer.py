@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """.baa 容器写入器 v0（BAA_FORMAT.md v0.1）。
 
-Ornith-1.5-35B-A3B（qwen35moe）→ models/ornith35.baa：
+Ornith-1.5-35B-A3B（qwen35moe）→ models/ornith35_xbf3.baa：
 - 专家张量（.experts.）→ XBF3（快速 absmax/4 路径，无网格搜索）；
   布局 = vnni2 kernel 消费格式：每行 K/256 个 superblock，sb = [2B bf16 scale][96B pack3(q+4)]
 - 其余 BF16 原样；视觉塔（model.visual.*）跳过；MTP 保留（flags bit0）
@@ -51,7 +51,7 @@ def norm_name(n):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", default="/d/xdna_llm/models/Ornith-1.5-35B-A3B")
-    ap.add_argument("--out", default="models/ornith35.baa")
+    ap.add_argument("--out", default="models/ornith35_xbf3.baa")
     ap.add_argument("--only", default=None, help="只写名字含该子串的张量（调试用）")
     a = ap.parse_args()
 
@@ -73,11 +73,11 @@ def main():
                   "block": 256, "packing": "pack3(q+4) offset-binary, vnni2 layout"},
     }
 
-    # 第一遍：算目录/数据布局
+    # 第一遍：算目录/数据布局（按规范化名排序——目录不变量）
     entries = []   # (name, scheme, shape, packed_size, payload_fn)
     data_off = 0
     t0 = time.time()
-    for n in names:
+    for n in sorted(names, key=norm_name):
         dtype, shape, _ = mr.meta(n)
         is_expert = ".experts." in n and dtype == "BF16"
         scheme = SCHEME_XBF3 if is_expert else SCHEME_BF16
