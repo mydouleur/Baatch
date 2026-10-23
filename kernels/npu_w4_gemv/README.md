@@ -58,21 +58,33 @@ CPU 2 大核（39 GB/s，M3'-1 vnni2 已实测）一条腿。**
 `vshift` 链重组 b 行 + `vmac.f`。疑点最集中在 unpack/转换序列（值相关只在
 转换类指令里可能出现）。
 
-### 已排除
+### 已排除（dequant_dbg 分阶段 dump 硬件实证，w=5 图样）
 
-- aie_api 版本：1.3.4 与 1.4.4 头文件编译结果**同样错**（同一 Peano nightly）。
-- 我的 kh 半趟改动：值无关结构性改动，且错误对称分布于两个半趟。
-- TileFuse 布局/host 打包：round-trip 全对；恒值图样系统隔离到位。
-- DMA/分发/输出映射：恒值与奇偶图样证明正确。
-- `aie::accumulate` 变长形：换成逐行 broadcast+mac 后输出全零（broadcast 标量用法
-  在 Peano 下另有问题），不能作为对照，已回退。
+- **unpack / sub zp / to_float+scale / b_buf 重组 reload：全部正确**——
+  dequant_dbg 四级 dump（st1 unpack、st2 sub、st3 cvt+scale、st4 MAC 的 concat
+  重组路径）与 numpy 参考逐 lane 一致。
+- aie_api 版本：1.3.4 与 1.4.4 头文件编译结果同样错（同一 Peano nightly）。
+- 我的 kh 半趟改动、TileFuse 布局、host 打包、DMA/分发/输出映射：全清白。
 
-### 根因判断
+### 根因判断（收窄到 accumulate lowering）
 
-Peano（llvm-aie 22.0.0.2026102001）对反量化链中某条指令（`vldb.unpack` /
-`vups.4x` / `vst.conv` 序列）的 aie2p lowering 存在值相关错误。TileFuse 官方流程
-用 xchesscc（Vitis），未走 Peano，故其论文数字不受影响。**要闭合需：写一个
-独立最小复现（单核单瓦片）报给 llvm-aie，或改用 xchesscc 编 kernel。**
+罪域唯一剩下 `aie::accumulate<64>(acc, a_vec, 0, b0..b7)` 变长形的 Peano lowering
+（反汇编见其编为共享 y1/y2 操作数的 4 条 vmac.f + vextbcst 车道提取链，值相关错误
+只能来自这条链的融合乘加路径——±5/±7 恰为 bf16 尾数 1/4 位值，疑 VMAC 内部
+bf16→bfp16 转换或部分积对齐的舍入模式错误）。
+
+绕写尝试（均失败，勿重复）：
+- 逐 lane `aie::mac(acc, 标量, b_vec)`：ternary 选 b_vec 被编成跳表 `j p2` → 上机挂起；
+  显式 8 行展开后输出变为**与权重无关的常数 3584**（b 数据路径死——另一条
+  Peano lowering 坑），未再深挖。
+- 1.4.4 aie_api 头文件：同错。
+
+### 收敛路径（留后续）
+
+1. 给 llvm-aie 报 issue（草稿 PEANO_BUG.md，待发）——附 dequant_dbg 分阶段 dump 复现。
+2. 或 xchesscc 编 kernel（mlir-aie#3690：xchesscc 编的 core 在 IRON raw-xrt 下有
+   挂起前科，需先验证该 issue 状态）。
+3. 或完全绕开 bf16 accumulate：b_buf 用 fp32 + fp32 VMAC / 或 int8 VMAC 路径重写。
 
 ## 工具链资产（本轮新增）
 

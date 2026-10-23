@@ -50,7 +50,7 @@ def main():
     # 比对
     got1 = np.fromfile("dbg.st1.bin", dtype=np.uint8)
     got2 = np.fromfile("dbg.st2.bin", dtype=np.int8)
-    got3 = bf16_to_f32(np.fromfile("dbg.st3.bin", dtype=np.uint16))
+    got3 = bf16_to_f32(np.fromfile("dbg.st3.bin", dtype=np.uint16))[:8192]
     exp_w = np.load("dbg_expect_w.npy"); exp_z = np.load("dbg_expect_z.npy"); exp_s = np.load("dbg_expect_s.npy")
     exp1 = np.load("dbg_expect_st1.npy")
     print("== st1 (unpack):")
@@ -74,6 +74,17 @@ def main():
     if len(neq3):
         for l in neq3[:8]:
             print(f"   lane {l}: got {got3[l]} exp {exp3[l]} (tile {l//64}, row {(l%64)//8}, col {l%8})")
+    # st4：重组行 dump（bf16，128 行 × 64 列）；期望 = (w[r][n] − z[n]) × s[n]
+    raw = np.fromfile("dbg.st3.bin", dtype=np.uint16)
+    if raw.size == 16384:
+        got4 = bf16_to_f32(raw[8192:])
+        exp4 = ((exp_w.astype(np.float32) - exp_z[None, :].astype(np.float32)) * exp_s[None, :]).reshape(-1)
+        d4 = np.abs(got4 - exp4)
+        neq4 = np.nonzero(d4 > 0.01)[0]
+        print("== st4 (MAC reload 重组行):", len(neq4), "mismatch", neq4[:10])
+        if len(neq4):
+            for l in neq4[:12]:
+                print(f"   row {l//64} col {l%64}: got {got4[l]} exp {exp4[l]}")
 
 if __name__ == "__main__":
     main()
