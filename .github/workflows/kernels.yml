@@ -90,6 +90,12 @@ jobs:
           AIECC=$(python3 -c "from aie.tools import MLIR_AIE_BIN_DIR as b; print(b)")/aiecc
           mkdir -p work
           "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 -std=c++20             -D__AIE_API_AIE_ADF_HPP__ -Wno-macro-redefined -Wno-unknown-attributes -I"$AIE_INC"             -DDIM_N=64 -DDIM_K=128 -c vm_mix_int4_64x8.cc -o work/vm_64x128.o
+          # 最小复现：反量化链分阶段 dump（Peano 值相关 bug 定位）
+          mkdir -p build_dbg work_dbg
+          "$PEANO_INSTALL_DIR/bin/clang++" --target=aie2p-none-unknown-elf -O2 -std=c++20             -D__AIE_API_AIE_ADF_HPP__ -Wno-macro-redefined -Wno-unknown-attributes -I"$AIE_INC"             -c dequant_dbg.cc -o work_dbg/dequant_dbg.o
+          python3 dequant_dbg.py --emit-mlir > work_dbg/aie.mlir
+          "$AIECC" --no-compile-host --no-xchesscc --no-xbridge --peano="$PEANO_INSTALL_DIR"             work_dbg/aie.mlir --aie-generate-npu-insts --npu-insts-name=build_dbg/insts.bin             --aie-generate-pdi --pdi-name=build_dbg/design.pdi             --aie-generate-xclbin --xclbin-name=build_dbg/unused.xclbin             --tmpdir=work_dbg --verbose 2>&1 | tail -30 || true
+          ls -la build_dbg/
           for SZ in 4096 8192; do
             mkdir -p build_$SZ work_$SZ
             cp work/vm_64x128.o work_$SZ/
