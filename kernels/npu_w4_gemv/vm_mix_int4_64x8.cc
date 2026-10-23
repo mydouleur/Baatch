@@ -105,8 +105,6 @@ void vecmat_vectorized(T_in_A *__restrict a, T_in_B *__restrict b,
       // TileFuse 原版 accumulate 形（1.3.4 wheel 的 aie_api 在 aie2p 上对 ±5/±7
       // 有错——疑似旧版 unpack/accumulate lowering；CI 升级 1.4.4 后复测）
       for (int row = 0; row < k_half; row += s) {
-        const aie::vector<T_in_A, s> a_vec = aie::load_v<s>(a_ptr);
-
 #define BVEC(t) aie::concat(aie::load_v<half_r>(b_ptr + 0 * s * half_r + t * half_r), \
                             aie::load_v<half_r>(b_ptr + 1 * s * half_r + t * half_r), \
                             aie::load_v<half_r>(b_ptr + 2 * s * half_r + t * half_r), \
@@ -125,9 +123,14 @@ void vecmat_vectorized(T_in_A *__restrict a, T_in_B *__restrict b,
         const aie::vector<T_in_A, four_r> b_vec_7 = BVEC(7);
 #undef BVEC
 
-        c_acc = aie::accumulate<four_r>(
-          c_acc, a_vec, 0, b_vec_0, b_vec_1, b_vec_2, b_vec_3,
-          b_vec_4, b_vec_5, b_vec_6, b_vec_7);
+        // 逐 lane 标量×向量 mac（aie::accumulate 变长形在 Peano 下对 |v|∈{5,7} 出错——
+        // dequant_dbg 分阶段 dump 证明 unpack/sub/cvt/reload 全对，唯 accumulate 可疑）
+        for (int t = 0; t < 8; t++) {
+          const aie::vector<T_in_A, four_r>& bv = t == 0 ? b_vec_0 : t == 1 ? b_vec_1 :
+              t == 2 ? b_vec_2 : t == 3 ? b_vec_3 : t == 4 ? b_vec_4 :
+              t == 5 ? b_vec_5 : t == 6 ? b_vec_6 : b_vec_7;
+          c_acc = aie::mac(c_acc, a_ptr[row + t], bv);
+        }
 
         b_ptr += n * s;
         a_ptr += s;
