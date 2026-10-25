@@ -12,10 +12,49 @@ static uint64_t hash_output(const std::vector<float>& y) {
   return h;
 }
 
+static void direct_moe_npu(Model& m, const MoeLayerPlan& p, DirectMoeWorkspace& w,
+                           const float* xin, float* xout, NpuBackend& npu,
+                           DirectProfile* profile, const int* top_override) {
+  using namespace Cfg;
+  direct_prepare(m, p, w, xin, profile, top_override);
+  direct_shared(m, p, w, profile);
+  std::vector<int16_t> q(H), hq(MI);
+  float sx = quant_xq16(w.xn.data(), H, q.data());
+  std::fill(w.acc.begin(), w.acc.end(), 0.f);
+  for (int t = 0; t < TOPK; t++) {
+    auto& work = w.experts[t];
+    if (work.gate_up->scheme != 3 || work.down->scheme != 3)
+      throw std::runtime_error("NPU routed comparison requires XBF4 experts");
+    auto start = std::chrono::steady_clock::now();
+    if (!npu.gemv_quantized(*work.gate_up, H, q.data(), sx, work.guv.data()))
+      throw std::runtime_error("NPU routed gate_up failed");
+    if (profile) {
+      direct_mark(profile, profile->gemv, start);
+      direct_mark(profile, profile->gate_up[t], start);
+    }
+    auto activation = std::chrono::steady_clock::now();
+    for (int i = 0; i < MI; i++) work.hd[i] = siluf(work.guv[i]) * work.guv[MI + i];
+    if (profile) direct_mark(profile, profile->activation, activation);
+    auto quant = std::chrono::steady_clock::now();
+    float hsx = quant_xq16(work.hd.data(), MI, hq.data());
+    if (profile) direct_mark(profile, profile->expert_quant, quant);
+    start = std::chrono::steady_clock::now();
+    if (!npu.gemv_quantized(*work.down, MI, hq.data(), hsx, work.out.data()))
+      throw std::runtime_error("NPU routed down failed");
+    if (profile) {
+      direct_mark(profile, profile->gemv, start);
+      direct_mark(profile, profile->down[t], start);
+    }
+    for (int i = 0; i < H; i++) w.acc[i] += work.route_weight * work.out[i];
+  }
+  direct_merge(w, xin, xout, profile);
+}
+
 int main(int argc, char** argv) { try {
   std::string baa = "D:/xdna_llm/models/ornith35_xbf24_dense.baa";
   std::string npu_dir = "models/npu", mode = "current", top8 = "model";
   int layer = 0, inputs = 8, rounds = 4, prefill_tokens = 0;
+  bool cpu_ref = false;
   for (int i = 1; i < argc; i++) {
     std::string s = argv[i];
     if (s == "--baa") baa = argv[++i];
@@ -26,20 +65,22 @@ int main(int argc, char** argv) { try {
     else if (s == "--rounds") rounds = atoi(argv[++i]);
     else if (s == "--top8") top8 = argv[++i];
     else if (s == "--prefill-tokens") prefill_tokens = atoi(argv[++i]);
+    else if (s == "--cpu-ref") cpu_ref = true;
     else throw std::runtime_error("unknown argument: " + s);
   }
   if (layer < 0 || layer >= Cfg::NLAYERS || inputs <= 0 || rounds <= 0 ||
       prefill_tokens < 0 || prefill_tokens > inputs || (prefill_tokens && mode != "direct") ||
       (top8 != "model" && top8 != "fixed" && top8 != "random") ||
-      (mode != "direct" && top8 != "model") ||
+      (mode != "direct" && mode != "npu" && top8 != "model") ||
+      (cpu_ref && (mode != "npu" || top8 != "model")) ||
       (mode != "current" && mode != "planned" && mode != "batch" && mode != "parallel" &&
-       mode != "direct" && mode != "scheduled"))
+       mode != "direct" && mode != "scheduled" && mode != "npu"))
     throw std::runtime_error("invalid layer, inputs, rounds, mode or top8");
 
   Model m;
   m.open(baa);
   NpuBackend npu;
-  npu.init(npu_dir, mode == "batch" || mode == "parallel");
+  npu.init(npu_dir, mode == "batch" || mode == "parallel" || mode == "npu");
   if (mode != "direct") m.npu = &npu;
   std::unique_ptr<MoeLayerPlan> plan;
   std::unique_ptr<MoeScheduler> scheduler;
@@ -73,6 +114,7 @@ int main(int argc, char** argv) { try {
       if (!moe_planned(m, *plan, workspace, in, out, batch.get()))
         throw std::runtime_error("MoE batch execution failed");
     } else if (mode == "direct") direct_moe(m, *plan, direct_workspace, in, out, &direct_profile, top_override);
+    else if (mode == "npu") direct_moe_npu(m, *plan, direct_workspace, in, out, npu, &direct_profile, top_override);
     else if (mode == "scheduled") scheduler->run(*plan, in, out, &direct_profile);
     else if (plan) moe_planned(m, *plan, workspace, in, out);
     else moe(m, layer, in, out);
@@ -112,6 +154,14 @@ int main(int argc, char** argv) { try {
   if (const char* gate = getenv("BENCH_GATE")) {
     while (GetFileAttributesA(gate) == INVALID_FILE_ATTRIBUTES) Sleep(1);
   }
+  std::vector<float> cpu_reference;
+  if (cpu_ref) {
+    cpu_reference.resize(x.size());
+    DirectMoeWorkspace ref_workspace;
+    for (int i = 0; i < inputs; i++)
+      direct_moe(m, *plan, ref_workspace, x.data() + (size_t)i * Cfg::H,
+                 cpu_reference.data() + (size_t)i * Cfg::H);
+  }
   npu.reset_stats();
   for (int i = 0; i < inputs; i++) {
     auto t0 = std::chrono::steady_clock::now();
@@ -120,6 +170,19 @@ int main(int argc, char** argv) { try {
     memcpy(reference.data() + (size_t)i * Cfg::H, y.data(), Cfg::H * 4);
     printf("COLD layer=%d input=%d ms=%.3f hash=%016llx\n", layer, i, ms,
            (unsigned long long)hash_output(y));
+    if (cpu_ref) {
+      double num = 0, den = 0, max_rel = 0;
+      for (int j = 0; j < Cfg::H; j++) {
+        float ref = cpu_reference[(size_t)i * Cfg::H + j];
+        double d = y[j] - ref;
+        num += d * d; den += (double)ref * ref;
+        max_rel = std::max(max_rel, fabs(d) / (fabs(ref) + 1e-4));
+      }
+      double rel_l2 = sqrt(num / (den + 1e-12));
+      printf("CPU_REF layer=%d input=%d rel_l2=%.6g max_rel=%.6g %s\n",
+             layer, i, rel_l2, max_rel, rel_l2 < 0.02 ? "PASS" : "FAIL");
+      if (rel_l2 >= 0.02) return 3;
+    }
   }
   printf("COLD_TOTAL layer=%d\n", layer);
   npu.print_stats();
@@ -147,7 +210,7 @@ int main(int argc, char** argv) { try {
   printf("WARM layer=%d calls=%d mean_ms=%.3f min_ms=%.3f max_ms=%.3f total_ms=%.3f\n",
          layer, count, total / count, best, worst, total);
   npu.print_stats();
-  if (mode == "direct" || mode == "scheduled") {
+  if (mode == "direct" || mode == "scheduled" || mode == "npu") {
     printf("[direct] router_ms=%.3f quant_ms=%.3f shared_ms=%.3f merge_ms=%.3f\n",
            direct_profile.router / count, direct_profile.quant / count,
            direct_profile.shared / count, direct_profile.merge / count);

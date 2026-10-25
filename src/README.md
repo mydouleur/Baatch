@@ -167,3 +167,6 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   E4×2 batch 数值通过但 layer0 约 12.0ms；列并行 p4 每列持完整专家，数值通过、
   约 10.8ms，优于串行 batch 但仍慢于 current 约 9.1ms，均不接默认引擎。
   E6、长序列 p8、独立 BD＋去除专家间等待均挂起，禁止直接重试。
+- 2026-10-26 `bench_moe --mode npu --cpu-ref` 增加同调度的 M=1 XBF4 routed 对照；
+  两种矩阵均复用稳定 K2048/N2048。layer0 暖态 NPU 3.341/3.620ms、CPU direct 0.336ms，
+  rel_l2≤0.000158、暖态 1280 次调用 0 flake。无收益，未接完整 decode。
