@@ -29,11 +29,13 @@ def main():
     ap.add_argument("--out", default="data_w4")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--size", type=int, default=4096, help="K=N（须与设计编译尺寸一致）")
+    ap.add_argument("--n", type=int, default=None, help="N 与 K 分离（矩形）")
     ap.add_argument("--pattern", default=None,
                     help="w1：A=1,W=1,S=1,Z=0 → C=K；w1z8：W=1,Z=8,S=1 → C=-7K（zp 隔离）")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
-    K = N = a.size
+    K = a.size
+    N = a.n if a.n is not None else a.size
 
     rng = np.random.default_rng(a.seed)
     A = (rng.random(K) * 0.19).astype(np.float32)

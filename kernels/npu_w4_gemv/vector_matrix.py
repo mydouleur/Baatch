@@ -24,27 +24,17 @@ except ImportError:
 def ceildiv(a, b):
     return (a + b - 1) // b
 
-def my_matmul(dev, N, K):
- 
-    # GEVM: A is vector (K,), B is matrix (K, N), C is vector (N,)
-    # We treat this as M=1, so each output is a scalar per tile
-    # n is the tile size for the output dimension (number of output elements per core)
-    m = 1  # Always 1 for GEVM (vector output, not matrix)
-    k = 128 # Reduction dimension tile size
-    n = 64 # Output dimension tile size
-    new_n = n // 2 + 2 # Add 2 for scaling factors in packed int8 weights
-    # nxk = 1024  # Tile block size for B transformation, assume B is col-major KxN
-    # nxk_div_n = nxk // n
-
+def my_matmul(dev, N, K, M=1):
+    k = 128
+    n = 64
+    new_n = n // 2 + 2
     n_cols = 8
     n_rows = 4
 
-    # GEVM dimensions
-    A_sz = K
-    # B is packed with int8 weights + scaling factors (2 extra elements per n-sized tile)
+    A_sz = M * K
     B_sz = K * N // 2 + K * N // n * 2
-    C_sz = N 
-    C_sz_div_n_cols = C_sz // n_cols 
+    C_sz = M * N
+    C_sz_div_n_cols = C_sz // n_cols
 
     N_div_n = N // n
     K_div_k = K // k
@@ -73,23 +63,21 @@ def my_matmul(dev, N, K):
         @device(dev_ty)
         def device_body():
             # GEVM: A is vector (bf16), B is matrix (int8 packed with scaling factors)
-            inA_ty = np.ndarray[(k,), np.dtype[dtype_in]]
+            inA_ty = np.ndarray[(M * k,), np.dtype[dtype_in]]
             inB_ty = np.ndarray[(k * new_n * n_rows,), np.dtype[dtype_in_B]]
-            MemC_ty = np.ndarray[(n * n_rows,), np.dtype[dtype_out]]
-            outC_ty = np.ndarray[(n,), np.dtype[dtype_out]]
+            MemC_ty = np.ndarray[(M * n * n_rows,), np.dtype[dtype_out]]
+            outC_ty = np.ndarray[(M * n,), np.dtype[dtype_out]]
             B_ty = np.ndarray[(k, new_n), np.dtype[dtype_in_B]]
-            # AIE Core Function declarations
             func_type = "vectorized" if vectorized else "scalar"
+            func_suffix = "" if M == 1 else "_m"
 
-            # link_with 位置随 mlir_aie 版本变化：1.3.4 在 external_func 上，main/1.4.x 在 core 上
             import inspect as _inspect
             _LINK_ON_FUNC = "link_with" in _inspect.signature(external_func.__init__).parameters
             _lk = f"vm_{n}x{k}.o"
-            zero = external_func(f"zero_{func_type}_{dtype_out_str}", inputs=[outC_ty],
+            zero = external_func(f"zero_{func_type}_{dtype_out_str}{func_suffix}", inputs=[outC_ty],
                                  **({"link_with": _lk} if _LINK_ON_FUNC else {}))
-            # For GEVM with mixed precision: vector A (bf16), matrix B (int8), output C (bf16)
             vecmat = external_func(
-                f"vecmat_{func_type}_{dtype_in_str}_{dtype_out_str}",
+                f"vecmat_{func_type}_{dtype_in_str}_{dtype_out_str}{func_suffix}",
                 inputs=[inA_ty, B_ty, outC_ty],
                 **({"link_with": _lk} if _LINK_ON_FUNC else {}),
             )
@@ -98,7 +86,7 @@ def my_matmul(dev, N, K):
             ShimTiles = [tile(i,0) for i in range(n_cols)]
             MemTiles = [tile(i,1) for i in range(n_cols)]
             memA_fifos = [None] * n_cols
-            inA_fifos = [None] * n_cols  # 1D: vector A is broadcast to all tiles
+            inA_fifos = [None] * n_cols
             outC_fifos = [[None] * n_cols for _ in range(n_rows)]
             inB_fifos = [[None] * n_cols for _ in range(n_rows)]  # 2D: matrix B is distributed
             memB_fifos = [None] * n_cols
@@ -110,40 +98,29 @@ def my_matmul(dev, N, K):
             # Input A (vector - broadcast to all cores)
             for col in range(n_cols):
                 memA_fifos[col] = object_fifo(
-                    f"mem_A{col}",
-                    ShimTiles[col],
-                    MemTiles[col],
-                    2,
-                    inA_ty,
+                    f"mem_A{col}", ShimTiles[col], MemTiles[col], 2, inA_ty,
                 )
             for col in range(n_cols):
+                consumers = [cores[j][col] for j in range(n_rows)]
                 inA_fifos[col] = object_fifo(
-                    f"inA{col}",
-                    MemTiles[col],
-                    [cores[j][col] for j in range(n_rows)],
-                    2,
-                    inA_ty,
+                    f"inA{col}", MemTiles[col], consumers, 2, inA_ty,
                 )
-                
                 object_fifo_link(memA_fifos[col], inA_fifos[col])
 
+            for col in range(n_cols):
                 # Output C
                 memC_fifos.append(
-                    object_fifo(f"memC{col}", MemTiles[col], ShimTiles[col], 2, MemC_ty) 
+                    object_fifo(f"memC{col}", MemTiles[col], ShimTiles[col], 2, MemC_ty)
                 )
                 for row in range(n_rows):
                     outC_fifos[row][col] = object_fifo(
-                        f"outC{row}{col}", 
-                        cores[row][col], 
-                        MemTiles[col], 
-                        2,
-                        outC_ty,
+                        f"outC{row}{col}", cores[row][col], MemTiles[col], 2, outC_ty,
                     )
-                    
+
                 object_fifo_link(
                     [outC_fifos[row][col] for row in range(n_rows)],
-                    memC_fifos[col], 
-                    [n*j for j in range(n_rows)],
+                    memC_fifos[col],
+                    [M*n*j for j in range(n_rows)],
                 )
 
                 # Input B (matrix - packed int8 with scaling factors, no transformation needed)
@@ -196,18 +173,14 @@ def my_matmul(dev, N, K):
                     @core(cores[row][col], **({} if _LINK_ON_FUNC else {"link_with": f"vm_{n}x{k}.o"}))
                     def core_body():
                         for _ in range_(0xFFFFFFFF):
-                            elem_out = outC_fifos[row][col].acquire(
-                                ObjectFifoPort.Produce, 1,
-                            )
+                            elem_out = outC_fifos[row][col].acquire(ObjectFifoPort.Produce, 1)
                             zero(elem_out)
-                            
                             for _ in range_(K_div_k):
                                 elem_in_a = inA_fifos[col].acquire(ObjectFifoPort.Consume, 1)
                                 elem_in_b = inB_fifos[row][col].acquire(ObjectFifoPort.Consume, 1)
                                 vecmat(elem_in_a, elem_in_b, elem_out)
                                 inA_fifos[col].release(ObjectFifoPort.Consume, 1)
                                 inB_fifos[row][col].release(ObjectFifoPort.Consume, 1)
-
                             outC_fifos[row][col].release(ObjectFifoPort.Produce, 1)
 
             # To/from AIE-array data movement
@@ -216,6 +189,7 @@ def my_matmul(dev, N, K):
                 np.ndarray[(A_sz,), np.dtype[dtype_in]],
                 np.ndarray[(B_sz,), np.dtype[dtype_in_B]],
                 np.ndarray[(C_sz,), np.dtype[dtype_out]],
+                sym_name=f"k{K}n{N}m{M}",
             )
             def sequence(A, B, C):
                 # GEVM: A is vector (K,) bf16, B is packed int8 matrix (K, N) with scaling factors, C is vector (N,) bf16
@@ -228,48 +202,51 @@ def my_matmul(dev, N, K):
                     for pingpong in [0,1]:
                         bd_id_base = 8 * pingpong
                         col_base = j * 2 * n * n_cols * n_rows + pingpong * n * n_cols * n_rows
-                        # print(col_base)
-                        if col_base >= N:
+                        if (N >= 2048 and 2 * j + pingpong >= num_transfer) or col_base >= N:
                             break
-                        # if (j == num_iter -1) and (pingpong == 1):
-                        #     break
                         for col in range(n_cols):
-                            # Transfer vector A (broadcast to all columns)
-                            npu_dma_memcpy_nd(
-                                metadata=memA_fifos[col],
-                                bd_id=bd_id_base + 3,
-                                mem=A,
-                                sizes=[1, 1, 1, K],
-                                strides=[0, 0, 0, 1],
-                            )
+                            B_col_offset = col * K * N // n_cols // n * new_n
+                            if M == 1:
+                                npu_dma_memcpy_nd(
+                                    metadata=memA_fifos[col], bd_id=bd_id_base + 3, mem=A,
+                                    sizes=[1, 1, 1, K], strides=[0, 0, 0, 1],
+                                )
+                            if M > 1:
+                                for a_tile in range(K_div_k):
+                                    npu_dma_memcpy_nd(
+                                        metadata=memA_fifos[col],
+                                        bd_id=bd_id_base + 3 + a_tile % 4,
+                                        mem=A,
+                                        offsets=[0, 0, 0, a_tile * M * k],
+                                        sizes=[1, 1, 1, M * k], strides=[0, 0, 0, 1],
+                                    )
                             for b_section in range(2):
                                 B_base_offset = K * n_rows * new_n * (2 * j + pingpong) + K * new_n // 2 * b_section
-                                # (j * K * N // num_iter + pingpong * K * N // num_iter // 2) // n * new_n
-                                B_col_offset = col * K * N // n_cols // n * new_n
-                                B_sizes = [K // k // 2, n_rows , new_n, k]
-                                B_strides = [k * new_n, K * new_n, k, 1]
-                                B_offset = B_base_offset + B_col_offset
                                 npu_dma_memcpy_nd(
                                     metadata=memB_fifos[col],
                                     bd_id=bd_id_base + 1 + b_section,
                                     mem=B,
-                                    offsets=[0, 0, 0, B_offset],
-                                    sizes=B_sizes,
-                                    strides=B_strides,
+                                    offsets=[0, 0, 0, B_base_offset + B_col_offset],
+                                    sizes=[K // k // 2, n_rows, new_n, k],
+                                    strides=[k * new_n, K * new_n, k, 1],
                                 )
                             
                             # Transfer output C
-                            C_base_offset = j * N // num_transfer * 2 + pingpong * N // num_transfer
-                            C_col_offset = col * n
-                            C_offset = C_base_offset + C_col_offset
-                            # C_size0 = N // num_iter // 2 // n_cols
+                            if M == 1:
+                                C_offset = j * N // num_transfer * 2 + pingpong * N // num_transfer + col * n
+                                C_sizes = [1, 1, N // n // num_transfer // n_cols, n]
+                                C_strides = [0, 0, n * n_cols, 1]
+                            else:
+                                C_offset = M * col_base + col * M * n_rows * n
+                                C_sizes = [1, 1, M * n_rows, n]
+                                C_strides = [0, 0, n, 1]
                             npu_dma_memcpy_nd(
                                 metadata=memC_fifos[col],
                                 bd_id=bd_id_base,
                                 mem=C,
                                 offsets=[0, 0, 0, C_offset],
-                                sizes=[1, 1, N // n // num_transfer // n_cols, n],
-                                strides=[0, 0, n * n_cols, 1],
+                                sizes=C_sizes,
+                                strides=C_strides,
                             )
                         if j > 0 or (j == 0 and pingpong > 0):
                             dma_wait(*memC_fifos)
@@ -283,9 +260,10 @@ if __name__ == "__main__":
     argparser.add_argument("--dev", type=str, choices=["npu", "npu2"], default="npu")
     argparser.add_argument("-N", type=int, default=4096)
     argparser.add_argument("-K", type=int, default=4096)
-    args, _ = argparser.parse_known_args()  # <- ignore the rest args in makefile-common
+    argparser.add_argument("-M", type=int, default=1)
+    args, _ = argparser.parse_known_args()
     dev = args.dev
     N = args.N
     K = args.K
-    my_matmul(dev, N, K)
+    my_matmul(dev, N, K, args.M)
                                                                                                        
