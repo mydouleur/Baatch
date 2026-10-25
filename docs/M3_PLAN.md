@@ -16,7 +16,7 @@
 - CPU 激活量化、整数求和、偶奇/模4拆分已向量化。
 - XBF4 routed experts NPU：40 层 80 个 GEMV 全部 PASS，最大 rel_l2=0.00546；独立生成及 prefill/decode 一致，0 flake，XBF2 保持 CPU。
 - MoE 单层 current/planned 输出一致，planned 暖态无显著收益。E4×2 batch 数值通过但更慢（layer0 约 12.0ms vs current 约 9.1ms）。列并行 p4 每列持完整专家，数值通过、约 10.8ms，优于串行 batch 但仍慢于 current；均不进入全模型。
-- 两核单份匿名模型驻留、SMT host、66B 行缓存、XBF2 合并归约与 CPU lm_head 已接默认；默认 decode 约 53–70ms/token（14–19 tok/s），NPU 0 flake。`BAA_MMAP=1`、`MOE_HOST_SIBLING=0`、`MOE_SCHEDULED=0`、`CPU_LM_HEAD=0` 可回退。常驻并发 XBF4 约 78GB/s、XBF2 约 61GB/s，后者仍未达 80GB/s 目标。
+- 两核单份匿名模型驻留、SMT host、66B 行缓存、XBF2 合并归约与 CPU lm_head 已接默认；默认 decode 约 53–70ms/token（14–19 tok/s），NPU 0 flake。`BAA_MMAP=1`、`MOE_HOST_SIBLING=0`、`MOE_SCHEDULED=0`、`CPU_LM_HEAD=0` 可回退。常驻并发 XBF4 约 78GB/s、XBF2 约 61GB/s，后者仍未达 80GB/s 目标。prefill 后台预热 decode 行缓存后，真实 65+64 的 decode 中位 60.15ms、平均 62.87ms，TTFT 5.88s。
 
 ## 当前执行顺序
 

@@ -194,6 +194,17 @@ int main(int argc, char** argv) { try {
       int T = ids.size();
       std::vector<float> x((size_t)T * Cfg::H), x2((size_t)T * Cfg::H);
       MoePrefillWorkspace prefill_workspace(T);
+      std::exception_ptr warm_error;
+      std::thread warmer([&] {
+        SetThreadAffinityMask(GetCurrentThread(), 1ull << 0);
+        try {
+          for (int l = 0; l < Cfg::NLAYERS; l++)
+            cpu_prepare_pretiled(m.T(LN(l, m.is_gdn(l) ? "linear_attn.out_proj.weight" : "self_attn.o_proj.weight")));
+          cpu_prepare_pretiled(lmh);
+        } catch (...) {
+          warm_error = std::current_exception();
+        }
+      });
       for (int t = 0; t < T; t++) embed(ids[t], x.data() + (size_t)t * Cfg::H);
       auto t0 = std::chrono::steady_clock::now();
       for (int l = 0; l < Cfg::NLAYERS; l++) {
@@ -203,6 +214,8 @@ int main(int argc, char** argv) { try {
         moe_prefill(m, *moe_plans[l], prefill_workspace, x2.data(), x.data());
         prof_add(g_prof.moe[l], mt);
       }
+      warmer.join();
+      if (warm_error) std::rethrow_exception(warm_error);
       float* last = x.data() + (size_t)(T - 1) * Cfg::H;
       m.nrm(fnorm, last, Cfg::H, last, true);
       m.mv(lmh, last, logits.data());

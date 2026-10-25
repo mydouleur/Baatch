@@ -29,6 +29,7 @@ namespace Cfg {
 #include "profile.h"
 
 static void cpu_mv_pretiled(const BaaTensor& t, const float* x, float* y);
+static void cpu_prepare_pretiled(const BaaTensor& t);
 static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y, Pool* pool = nullptr);
 
 struct GdnState {
@@ -185,7 +186,7 @@ static void cpu_mv_pretiled(const BaaTensor& t, const float* x, float* y) {
       }
 }
 
-static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y, Pool* pool) {
+static void cpu_prepare_pretiled(const BaaTensor& t) {
   int N = (int)t.shape[0], K = (int)t.shape[1];
   int physical_K = (t.flags & 2) ? 4096 : (t.flags & 4) ? 2048 : K;
   int physical_N = (t.flags & 2) || (t.flags & 8) ? 8192 : (t.flags & 4) ? 2048 : (N + 2047) & ~2047;
@@ -221,6 +222,11 @@ static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y, P
       }
     }
   }
+}
+
+static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y, Pool* pool) {
+  int N = (int)t.shape[0], K = (int)t.shape[1];
+  cpu_prepare_pretiled(t);
   std::vector<int8_t> q(K), xe(K / 2), xo(K / 2);
   std::vector<float> sums(K / XBF_SB);
   float sx = quant_xq(x, K, q.data(), sums.data());
