@@ -146,6 +146,10 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   同二进制 65+64 平均 65.37→53.82ms、中位 62.0→52.9ms，64 个 IDs 一致，NPU 对照 0 flake。
   decode attention 16 头两核化并保持每头标量归约；`PROF=1 PROF_DECODE=1` 输出 decode
   独立逐层、router/shared/routed、NPU submit/wait/sync 与 lm_head 分项。25ms/token 尚未达到。
+- 2026-10-26 scheduled MoE 将 shared 提前到 worker，与主线程单核 router 重叠；routed 两核各连续处理
+  4 个专家并按原顺序归并。direct 仍使用两核 router。layer0/layer10 direct/scheduled 哈希一致；固定
+  `ids=0..64` 的 65+64 IDs 一致，候选三轮平均 53.011/53.256/53.489ms，MoE 16.414/16.490/16.127ms，
+  HEAD 对照为 53.306/55.483ms 与 17.454/18.225ms。25ms/token 尚未达到。
 - CPU 激活量化、整数求和、偶奇/模4拆分已 AVX-512 化，单测与层对拍 PASS。
   GDN 状态更新与输出已融合，少读约 63MB/token；prefill 后 decode 实测最低约 67ms。
   当前约 1.78GB/token，CPU4+NPU 并发探针约 77GB/s；18ms 需约 99GB/s 且受逐层依赖限制。

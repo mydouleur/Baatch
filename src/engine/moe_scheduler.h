@@ -48,14 +48,16 @@ static void direct_mark(DirectProfile* profile, double& dst,
   if (profile) dst += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() * 1e3;
 }
 
-static void direct_prepare(Model& m, const MoeLayerPlan& p, DirectMoeWorkspace& w,
-                           const float* xin, DirectProfile* profile,
-                           const int* top_override = nullptr) {
+static void direct_route(Model& m, const MoeLayerPlan& p, DirectMoeWorkspace& w,
+                         DirectProfile* profile, const int* top_override, bool single_thread) {
   using namespace Cfg;
   auto t0 = std::chrono::steady_clock::now();
-  m.nrm(*p.norm, xin, H, w.xn.data(), true);
-  if (p.router->scheme == 5) gemv_f32(m.pool, p.router->f32(), NE, H, w.xn.data(), w.logits.data());
-  else m.mv(*p.router, w.xn.data(), w.logits.data());
+  if (p.router->scheme == 5) {
+    if (single_thread) gemv_f32_rows(p.router->f32(), 0, NE, H, w.xn.data(), w.logits.data());
+    else gemv_f32(m.pool, p.router->f32(), NE, H, w.xn.data(), w.logits.data());
+  } else {
+    m.mv(*p.router, w.xn.data(), w.logits.data());
+  }
   float mx = *std::max_element(w.logits.begin(), w.logits.end());
   float sum = 0;
   for (int i = 0; i < NE; i++) { w.logits[i] = expf(w.logits[i] - mx); sum += w.logits[i]; }
@@ -72,12 +74,26 @@ static void direct_prepare(Model& m, const MoeLayerPlan& p, DirectMoeWorkspace& 
   }
   for (int t = 0; t < TOPK; t++) w.experts[t].route_weight /= std::max(wsum, 1e-9f);
   if (profile) direct_mark(profile, profile->router, t0);
+}
 
-  t0 = std::chrono::steady_clock::now();
+static void direct_quant(DirectMoeWorkspace& w, DirectProfile* profile) {
+  using namespace Cfg;
+  auto t0 = std::chrono::steady_clock::now();
   w.sx = quant_xq(w.xn.data(), H, w.q.data(), w.sum.data());
   xq_split4(w.q.data(), H, w.xe.data(), w.xo.data());
   xq_split2(w.q.data(), H, w.q4.data());
   if (profile) direct_mark(profile, profile->quant, t0);
+}
+
+static void direct_prepare(Model& m, const MoeLayerPlan& p, DirectMoeWorkspace& w,
+                           const float* xin, DirectProfile* profile,
+                           const int* top_override = nullptr) {
+  using namespace Cfg;
+  auto t0 = std::chrono::steady_clock::now();
+  m.nrm(*p.norm, xin, H, w.xn.data(), true);
+  if (profile) direct_mark(profile, profile->router, t0);
+  direct_route(m, p, w, profile, top_override, false);
+  direct_quant(w, profile);
 }
 
 static void direct_shared(Model& m, const MoeLayerPlan& p, DirectMoeWorkspace& w,
@@ -97,77 +113,69 @@ static void direct_shared(Model& m, const MoeLayerPlan& p, DirectMoeWorkspace& w
 
 static void direct_routed(Model& m, DirectMoeWorkspace& w, DirectProfile* profile) {
   using namespace Cfg;
-  auto run_xbf4 = [&](const BaaTensor& t, int n_in, const int8_t* xe, const int8_t* xo,
-                      const float* sum, float sx, float* y) {
-    int R = (int)t.shape[0], half = (R / 2 + 15) & ~15;
-    double kernel_ms[2]{};
-    auto outer = std::chrono::steady_clock::now();
-    m.pool.run([&](int id) {
+  double gemv_ms[2]{}, quant_ms[2]{}, activation_ms[2]{}, work_ms[2]{};
+  auto outer = std::chrono::steady_clock::now();
+  m.pool.run([&](int id) {
+    auto work_start = std::chrono::steady_clock::now();
+    auto run_xbf4 = [&](const BaaTensor& t, int n_in, const int8_t* xe, const int8_t* xo,
+                        const float* sum, float sx, float* y) {
       auto start = std::chrono::steady_clock::now();
-      if (id == 0) gemv_xbf4_rows(t.data, 0, half, n_in, xe, xo, sum, sx, y);
-      else gemv_xbf4_rows(t.data, half, R - half, n_in, xe, xo, sum, sx, y);
-      kernel_ms[id] = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() * 1e3;
-    });
-    if (profile) {
-      double kernel = std::max(kernel_ms[0], kernel_ms[1]);
-      profile->gemv += kernel;
-      direct_mark(profile, profile->pool_sync, outer);
-      profile->pool_sync -= kernel;
-    }
-  };
-  auto run_xbf2 = [&](const BaaTensor& t, int n_in, const int8_t* const* q4,
-                      const float* sum, float sx, float* y) {
-    int R = (int)t.shape[0], half = (R / 2 + 15) & ~15;
-    double kernel_ms[2]{};
-    auto outer = std::chrono::steady_clock::now();
-    m.pool.run([&](int id) {
+      gemv_xbf4_rows(t.data, 0, (int)t.shape[0], n_in, xe, xo, sum, sx, y);
+      gemv_ms[id] += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() * 1e3;
+    };
+    auto run_xbf2 = [&](const BaaTensor& t, int n_in, const int8_t* const* q4,
+                        const float* sum, float sx, float* y) {
       auto start = std::chrono::steady_clock::now();
-      if (id == 0) gemv_xbf2_rows(t.data, 0, half, n_in, q4, sum, sx, y);
-      else gemv_xbf2_rows(t.data, half, R - half, n_in, q4, sum, sx, y);
-      kernel_ms[id] = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() * 1e3;
-    });
-    if (profile) {
-      double kernel = std::max(kernel_ms[0], kernel_ms[1]);
-      profile->gemv += kernel;
-      direct_mark(profile, profile->pool_sync, outer);
-      profile->pool_sync -= kernel;
-    }
-  };
-  std::fill(w.acc.begin(), w.acc.end(), 0.f);
-  for (int t = 0; t < TOPK; t++) {
-    auto& work = w.experts[t];
-    const BaaTensor& gu = *work.gate_up;
-    auto t0 = std::chrono::steady_clock::now();
-    if (gu.scheme == 3) {
-      run_xbf4(gu, H, w.xe.data(), w.xo.data(), w.sum.data(), w.sx, work.guv.data());
-    } else if (gu.scheme == 4) {
-      const int8_t* q4[] = {w.q4.data(), w.q4.data() + H / 4, w.q4.data() + H / 2, w.q4.data() + 3 * H / 4};
-      run_xbf2(gu, H, q4, w.sum.data(), w.sx, work.guv.data());
-    } else {
-      throw std::runtime_error("direct MoE unsupported gate_up scheme");
-    }
-    if (profile) direct_mark(profile, profile->gate_up[t], t0);
-    auto ta = std::chrono::steady_clock::now();
-    for (int i = 0; i < MI; i++) work.hd[i] = siluf(work.guv[i]) * work.guv[MI + i];
-    if (profile) direct_mark(profile, profile->activation, ta);
+      gemv_xbf2_rows(t.data, 0, (int)t.shape[0], n_in, q4, sum, sx, y);
+      gemv_ms[id] += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() * 1e3;
+    };
+    for (int t = id * TOPK / 2; t < (id + 1) * TOPK / 2; t++) {
+      auto& work = w.experts[t];
+      const BaaTensor& gu = *work.gate_up;
+      auto t0 = std::chrono::steady_clock::now();
+      if (gu.scheme == 3) {
+        run_xbf4(gu, H, w.xe.data(), w.xo.data(), w.sum.data(), w.sx, work.guv.data());
+      } else if (gu.scheme == 4) {
+        const int8_t* q4[] = {w.q4.data(), w.q4.data() + H / 4, w.q4.data() + H / 2, w.q4.data() + 3 * H / 4};
+        run_xbf2(gu, H, q4, w.sum.data(), w.sx, work.guv.data());
+      } else {
+        throw std::runtime_error("direct MoE unsupported gate_up scheme");
+      }
+      if (profile) direct_mark(profile, profile->gate_up[t], t0);
+      auto ta = std::chrono::steady_clock::now();
+      for (int i = 0; i < MI; i++) work.hd[i] = siluf(work.guv[i]) * work.guv[MI + i];
+      if (profile) activation_ms[id] += std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - ta).count() * 1e3;
 
-    const BaaTensor& down = *work.down;
-    t0 = std::chrono::steady_clock::now();
-    work.sx = quant_xq(work.hd.data(), MI, work.q.data(), work.sum.data());
-    if (down.scheme == 3) xq_split4(work.q.data(), MI, work.xe.data(), work.xo.data());
-    else if (down.scheme == 4) xq_split2(work.q.data(), MI, work.q4.data());
-    else throw std::runtime_error("direct MoE unsupported down scheme");
-    if (profile) direct_mark(profile, profile->expert_quant, t0);
-    if (down.scheme == 3) {
-      run_xbf4(down, MI, work.xe.data(), work.xo.data(), work.sum.data(), work.sx, work.out.data());
-    } else {
-      const int8_t* q4[] = {work.q4.data(), work.q4.data() + MI / 4,
-                            work.q4.data() + MI / 2, work.q4.data() + 3 * MI / 4};
-      run_xbf2(down, MI, q4, work.sum.data(), work.sx, work.out.data());
+      const BaaTensor& down = *work.down;
+      t0 = std::chrono::steady_clock::now();
+      work.sx = quant_xq(work.hd.data(), MI, work.q.data(), work.sum.data());
+      if (down.scheme == 3) xq_split4(work.q.data(), MI, work.xe.data(), work.xo.data());
+      else if (down.scheme == 4) xq_split2(work.q.data(), MI, work.q4.data());
+      else throw std::runtime_error("direct MoE unsupported down scheme");
+      if (profile) quant_ms[id] += std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - t0).count() * 1e3;
+      if (down.scheme == 3) {
+        run_xbf4(down, MI, work.xe.data(), work.xo.data(), work.sum.data(), work.sx, work.out.data());
+      } else {
+        const int8_t* q4[] = {work.q4.data(), work.q4.data() + MI / 4,
+                              work.q4.data() + MI / 2, work.q4.data() + 3 * MI / 4};
+        run_xbf2(down, MI, q4, work.sum.data(), work.sx, work.out.data());
+      }
+      if (profile) direct_mark(profile, profile->down[t], t0);
     }
-    if (profile) direct_mark(profile, profile->down[t], t0);
-    for (int i = 0; i < H; i++) w.acc[i] += work.route_weight * work.out[i];
+    work_ms[id] = std::chrono::duration<double>(std::chrono::steady_clock::now() - work_start).count() * 1e3;
+  });
+  if (profile) {
+    direct_mark(profile, profile->pool_sync, outer);
+    profile->pool_sync -= std::max(work_ms[0], work_ms[1]);
+    profile->gemv += std::max(gemv_ms[0], gemv_ms[1]);
+    profile->expert_quant += quant_ms[0] + quant_ms[1];
+    profile->activation += activation_ms[0] + activation_ms[1];
   }
+  std::fill(w.acc.begin(), w.acc.end(), 0.f);
+  for (int t = 0; t < TOPK; t++)
+    for (int i = 0; i < H; i++) w.acc[i] += w.experts[t].route_weight * w.experts[t].out[i];
 }
 
 static void direct_merge(DirectMoeWorkspace& w, const float* xin, float* xout, DirectProfile* profile) {
@@ -207,7 +215,7 @@ struct MoeScheduler {
         cv.wait(lock, [&] { return task || stop; });
         if (stop) break;
         try {
-          direct_routed(m, w, profile);
+          direct_shared(m, *p, w, profile);
         } catch (...) {
           error = std::current_exception();
         }
@@ -229,7 +237,9 @@ struct MoeScheduler {
 
   void run(const MoeLayerPlan& plan, const float* xin, float* xout, DirectProfile* next_profile = nullptr) {
     p = &plan;
-    direct_prepare(m, *p, w, xin, next_profile);
+    auto t0 = std::chrono::steady_clock::now();
+    m.nrm(*p->norm, xin, Cfg::H, w.xn.data(), true);
+    if (next_profile) direct_mark(next_profile, next_profile->router, t0);
     {
       std::lock_guard<std::mutex> lock(mu);
       profile = next_profile;
@@ -238,7 +248,9 @@ struct MoeScheduler {
       task = true;
       cv.notify_all();
     }
-    direct_shared(m, *p, w, next_profile);
+    direct_route(m, *p, w, next_profile, nullptr, true);
+    direct_quant(w, next_profile);
+    direct_routed(m, w, next_profile);
     {
       std::unique_lock<std::mutex> lock(mu);
       cv.wait(lock, [&] { return done; });

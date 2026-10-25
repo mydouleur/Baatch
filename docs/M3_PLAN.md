@@ -23,7 +23,7 @@
 1. **XBF4 routed experts NPU 验收：已完成**
    路由近并列时量化噪声会改变后续 greedy token；不把与 CPU 逐 token 相同作为验收条件，质量门留待后续。
 2. **decode 单 token 分项优化**
-   N12288 旧 NPU 路径实测投影约 31.27ms/token，默认已改为数值一致的 CPU 路径；65+64 同二进制 A/B 从平均 65.37ms 降至 53.82ms。继续依据 `PROF=1 PROF_DECODE=1` 的逐层数据优化 MoE、out_proj、GDN 与 lm_head；不得回退 insts 热换、多 context 或已挂起的 weight-ahead 双静态入口协议。
+   N12288 旧 NPU 路径实测投影约 31.27ms/token，默认已改为数值一致的 CPU 路径；65+64 同二进制 A/B 从平均 65.37ms 降至 53.82ms。后续 MoE 按专家两核连续执行并重叠 router/shared，固定输入三轮 MoE 为 16.127–16.490ms/token，总时延 53.011–53.489ms。继续依据 `PROF=1 PROF_DECODE=1` 的逐层数据优化 out_proj、GDN 与 lm_head；不得回退 insts 热换、多 context 或已挂起的 weight-ahead 双静态入口协议。
 3. **prefill M>1 与性能功耗基线**
    K2048 主 fused Shape 的 M2 standalone 已闭合且有 kernel 收益；K4096/N2048 仍确定性 ERT timeout。成对引擎路径出现块损坏，hidden rel_l2=0.528，接入已移除，默认保持 M1。继续按逐层成本优化 MoE/GEMM 与 decode，并建立功耗对照。
 4. **MTP**
