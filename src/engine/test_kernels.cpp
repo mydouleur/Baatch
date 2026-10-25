@@ -79,6 +79,30 @@ static int run_case(int R, int C, std::mt19937& rng) {
       memcpy(dat.data() + (r * sb_per_row + sb) * (256 / VPB), base + 2, 256 / VPB);
     }
   ref_gemv<OFF>(dat.data(), sc.data(), R, C, xq.data(), sx, sumxq.data(), yref.data(), VPB);
+  if constexpr (BITS == 4) {
+    std::vector<uint8_t> w128((size_t)R * (C / 128) * 130);
+    std::vector<int> sums128(C / 128);
+    std::vector<int8_t> xe(C / 2), xo(C / 2);
+    std::vector<float> y128(R);
+    for (int b = 0; b < C / 128; b++) {
+      for (int i = 0; i < 128; i++) sums128[b] += xq[b * 128 + i];
+      for (int r = 0; r < R; r++) {
+        const uint8_t* src = w.data() + (size_t)r * wrow + (b / 2) * 130;
+        uint8_t* dst = w128.data() + ((size_t)r * (C / 128) + b) * 130;
+        memcpy(dst, src, 2);
+        memcpy(dst + 2, src + 2 + (b % 2) * 64, 64);
+      }
+    }
+    xq_split4(xq.data(), C, xe.data(), xo.data());
+    gemv_xbf4_128_rows(w128.data(), R, C, xe.data(), xo.data(), sums128.data(), sx, y128.data());
+    for (int r = 0; r < R; r++) {
+      float rel = fabsf(y128[r] - yref[r]) / (fabsf(yref[r]) + 1e-3f);
+      if (rel > 2e-2f && fabsf(y128[r] - yref[r]) > 1e-2f) {
+        printf("XBF4-128 row=%d FAIL rel=%.3e\n", r, rel);
+        return 1;
+      }
+    }
+  }
   int bad = 0; float max_rel = 0;
   for (int r = 0; r < R; r++) {
     float d = fabsf(y[r] - yref[r]);

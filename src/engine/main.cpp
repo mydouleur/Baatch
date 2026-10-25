@@ -155,7 +155,8 @@ int main(int argc, char** argv) { try {
     std::vector<std::unique_ptr<MoeLayerPlan>> moe_plans;
     for (int l = 0; l < Cfg::NLAYERS; l++) moe_plans.push_back(std::make_unique<MoeLayerPlan>(m, l));
     std::unique_ptr<MoeScheduler> moe_scheduler;
-    if (env_flag("MOE_SCHEDULED")) moe_scheduler = std::make_unique<MoeScheduler>(m);
+    const char* scheduled = getenv("MOE_SCHEDULED");
+    if (!scheduled || *scheduled != '0') moe_scheduler = std::make_unique<MoeScheduler>(m);
     fprintf(stderr, "ckpt2: states alloc ok\n");
     std::vector<float> logits(Cfg::VOCAB);
     auto embed = [&](int tok, float* x) {

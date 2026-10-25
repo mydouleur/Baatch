@@ -21,6 +21,7 @@ struct BaaTensor {
   uint64_t shape[4];
   const uint8_t* data; // mmap 指针
   uint64_t size;       // packed_size
+  mutable std::vector<uint8_t> cpu_rows;
   // BF16 访问
   const uint16_t* bf16() const { return (const uint16_t*)data; }
   const float* f32() const { return (const float*)data; }

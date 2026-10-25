@@ -185,46 +185,46 @@ static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y) {
   int N = (int)t.shape[0], K = (int)t.shape[1];
   int physical_K = (t.flags & 2) ? 4096 : (t.flags & 4) ? 2048 : K;
   int physical_N = (t.flags & 2) || (t.flags & 8) ? 8192 : (t.flags & 4) ? 2048 : (N + 2047) & ~2047;
-  std::vector<int8_t> q(K);
-  std::vector<float> sums(K / XBF_SB);
-  float sx = quant_xq(x, K, q.data(), sums.data());
-  std::vector<int> tile_sums(physical_K / 128);
-  for (int ltr = 0; ltr < physical_K / 128; ltr++)
-    for (int i = 0; i < 128; i++) tile_sums[ltr] += q[ltr * 128 + i];
-  for (int n = 0; n < N; n++) y[n] = 0.f;
-  const uint8_t* tiles = t.data;
-  int nlt_col = physical_N / 64, idx = 0;
-  for (int cm = 0; cm < 8; cm++) {
-    for (int lt_col = cm; lt_col < nlt_col; lt_col += 8) {
-      for (int ltr = 0; ltr < physical_K / 128; ltr++, idx++) {
-        if (lt_col >= N / 64) continue;
-        const uint8_t* tp = tiles + (size_t)idx * 4352;
-        const uint16_t* sc = (const uint16_t*)(tp + 4096);
-        alignas(64) uint8_t weights[64 * 128];
-        for (int str = 0; str < 16; str++) {
-          for (int i = 0; i < 8; i++) {
-            for (int stc = 0; stc < 8; stc++) {
-              const uint32_t packed = *reinterpret_cast<const uint32_t*>(tp + (str * 8 + stc) * 32 + i * 4);
-              for (int lane = 0; lane < 4; lane++) {
-                weights[(stc * 8 + lane * 2) * 128 + str * 8 + i] = (packed >> (lane * 8)) & 0xF;
-                weights[(stc * 8 + lane * 2 + 1) * 128 + str * 8 + i] = (packed >> (lane * 8 + 4)) & 0xF;
+  if (t.cpu_rows.empty()) {
+    t.cpu_rows.resize((size_t)N * (K / 128) * 130);
+    int nlt_col = physical_N / 64, idx = 0;
+    for (int cm = 0; cm < 8; cm++) {
+      for (int lt_col = cm; lt_col < nlt_col; lt_col += 8) {
+        for (int ltr = 0; ltr < physical_K / 128; ltr++, idx++) {
+          if (lt_col >= (N + 63) / 64 || ltr >= K / 128) continue;
+          const uint8_t* tp = t.data + (size_t)idx * 4352;
+          const uint16_t* sc = (const uint16_t*)(tp + 4096);
+          alignas(64) uint8_t weights[64 * 128];
+          for (int str = 0; str < 16; str++) {
+            for (int i = 0; i < 8; i++) {
+              for (int stc = 0; stc < 8; stc++) {
+                const uint32_t packed = *reinterpret_cast<const uint32_t*>(tp + (str * 8 + stc) * 32 + i * 4);
+                for (int lane = 0; lane < 4; lane++) {
+                  weights[(stc * 8 + lane * 2) * 128 + str * 8 + i] = (packed >> (lane * 8)) & 0xF;
+                  weights[(stc * 8 + lane * 2 + 1) * 128 + str * 8 + i] = (packed >> (lane * 8 + 4)) & 0xF;
+                }
               }
             }
           }
-        }
-        for (int n = 0; n < 64; n++) {
-          __m512i acc = _mm512_setzero_si512();
-          for (int mm = 0; mm < 128; mm += 64) {
-            __m512i wv = _mm512_load_si512(weights + n * 128 + mm);
-            __m512i qv = _mm512_loadu_si512(q.data() + ltr * 128 + mm);
-            acc = _mm512_dpbusd_epi32(acc, wv, qv);
+          for (int n = 0; n < 64 && lt_col * 64 + n < N; n++) {
+            uint8_t* row = t.cpu_rows.data() + ((size_t)(lt_col * 64 + n) * (K / 128) + ltr) * 130;
+            row[0] = sc[n] & 0xFF;
+            row[1] = sc[n] >> 8;
+            for (int k = 0; k < 128; k += 2)
+              row[2 + k / 2] = weights[n * 128 + k] | (weights[n * 128 + k + 1] << 4);
           }
-          int isum = _mm512_reduce_add_epi32(acc);
-          y[lt_col * 64 + n] += (isum - 8 * tile_sums[ltr]) * sx * bf16_to_f32(sc[n]);
         }
       }
     }
   }
+  std::vector<int8_t> q(K), xe(K / 2), xo(K / 2);
+  std::vector<float> sums(K / XBF_SB);
+  float sx = quant_xq(x, K, q.data(), sums.data());
+  xq_split4(q.data(), K, xe.data(), xo.data());
+  std::vector<int> tile_sums(K / 128);
+  for (int b = 0; b < K / 128; b++)
+    for (int i = 0; i < 128; i++) tile_sums[b] += q[b * 128 + i];
+  gemv_xbf4_128_rows(t.cpu_rows.data(), N, K, xe.data(), xo.data(), tile_sums.data(), sx, y);
 }
 
 // ---------------- GDN decode（linear_attn，照 qwen35moe/delta-net decode 数学） ----------------

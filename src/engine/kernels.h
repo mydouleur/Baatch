@@ -31,19 +31,19 @@ struct Pool {
   std::thread th;
   std::atomic<uint64_t> go{0}, done{0};
   std::function<void(int)> fn;
-  bool stop = false;
+  std::atomic<bool> stop{false};
   Pool() {
     th = std::thread([this] {
       SetThreadAffinityMask(GetCurrentThread(), 1ull << 2);
       uint64_t seen = 0;
-      while (!stop) {
+      while (!stop.load(std::memory_order_relaxed)) {
         uint64_t g = go.load(std::memory_order_acquire);
         if (g != seen) { seen = g; fn(1); done.store(seen, std::memory_order_release); }
         else _mm_pause();
       }
     });
   }
-  ~Pool() { stop = true; th.join(); }
+  ~Pool() { stop.store(true, std::memory_order_relaxed); th.join(); }
   void run(std::function<void(int)> f) {
     fn = std::move(f);
     go.fetch_add(1, std::memory_order_release);
