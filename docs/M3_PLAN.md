@@ -13,7 +13,7 @@
 - M3'-b：NPU W4A8 密集路径、异步 submit/wait、超时熔断、hw_context 生命周期管理。
 - M3 功能验收：三次独立 32-token 输出一致、0 flake。
 - M=1 dense prefill：64-token 分块；MoE 按专家多 token GEMM 已接入，T=1/2/8/65 对拍通过，65-token prefill 5.92s（10.98 tok/s），输出一致。
-- CPU 激活量化、整数求和、偶奇/模4拆分已向量化。
+- CPU 激活量化、整数求和、偶奇/模4拆分已向量化。prefill `PROF=1` 覆盖 proj/state/out/MoE；attention 16 头两核化使 256-token state 总计减少 0.461s。
 - XBF4 routed experts NPU：40 层 80 个 GEMV 全部 PASS，最大 rel_l2=0.00546；独立生成及 prefill/decode 一致，0 flake，XBF2 保持 CPU。
 - MoE 单层 current/planned 输出一致，planned 暖态无显著收益。E4×2 batch 数值通过但更慢（layer0 约 12.0ms vs current 约 9.1ms）。列并行 p4 每列持完整专家，数值通过、约 10.8ms，优于串行 batch 但仍慢于 current；均不进入全模型。
 - 两核单份匿名模型驻留、SMT host、66B 行缓存、XBF2 合并归约与 CPU lm_head 已接默认；默认 decode 约 53–70ms/token（14–19 tok/s），NPU 0 flake。`BAA_MMAP=1`、`MOE_HOST_SIBLING=0`、`MOE_SCHEDULED=0`、`CPU_LM_HEAD=0` 可回退。常驻并发 XBF4 约 78GB/s、XBF2 约 61GB/s，后者仍未达 80GB/s 目标。prefill 后台预热 decode 行缓存，GDN 32 头两核并行后，router 两核化、NPU run 复用后，真实 65+64 的 decode 中位 57.90ms、平均 58.71ms、p95 61.9ms，TTFT 5.88s。

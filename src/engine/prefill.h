@@ -7,6 +7,7 @@ static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, i
   std::vector<float> beta(T * VH), alpha(T * VH);
   const auto& qw = m.T(LN(l, "linear_attn.in_proj_qkv.weight"));
   const auto& zw = m.T(LN(l, "linear_attn.in_proj_z.weight"));
+  auto pt = prof_now();
   for (int t = 0; t < T; t++)
     m.nrm(m.T(LN(l, "input_layernorm.weight")), xin + t * H, H, xn.data() + t * H, true);
   const BaaTensor* weights[] = {&qw, &zw};
@@ -33,6 +34,7 @@ static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, i
     m.mv(m.T(LN(l, "linear_attn.in_proj_b.weight")), xn.data() + t * H, beta.data() + t * VH);
     m.mv(m.T(LN(l, "linear_attn.in_proj_a.weight")), xn.data() + t * H, alpha.data() + t * VH);
   }
+  prof_add(g_prof.gdn_proj[l], pt); pt = prof_now();
 
   const float* dt_b = m.T(LN(l, "linear_attn.dt_bias")).f32();
   const float* a_log = m.T(LN(l, "linear_attn.A_log")).f32();
@@ -115,7 +117,9 @@ static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, i
       for (int i = 0; i < HD; i++)
         og[j * HD + i] = p[i] * inv * nw[i] * siluf(z[t * VAL_DIM + j * HD + i]);
     }
+    prof_add(g_prof.gdn_state[l], pt); pt = prof_now();
     m.mv_out_prefill(m.T(LN(l, "linear_attn.out_proj.weight")), og.data(), dec.data());
+    prof_add(g_prof.gdn_out[l], pt); pt = prof_now();
     for (int i = 0; i < H; i++) xout[t * H + i] = xin[t * H + i] + dec[i];
   }
 }
@@ -134,6 +138,7 @@ static void attn_prefill_chunk(Model& m, int l, AttnState& st, int pos0,
   const auto& qw = m.T(LN(l, "self_attn.q_proj.weight"));
   const auto& kw = m.T(LN(l, "self_attn.k_proj.weight"));
   const auto& vw = m.T(LN(l, "self_attn.v_proj.weight"));
+  auto pt = prof_now();
   for (int t = 0; t < T; t++)
     m.nrm(m.T(LN(l, "input_layernorm.weight")), xin + t * H, H, xn.data() + t * H, true);
   const BaaTensor* weights[] = {&qw, &kw, &vw};
@@ -155,6 +160,7 @@ static void attn_prefill_chunk(Model& m, int l, AttnState& st, int pos0,
       m.mv(vw, xn.data() + t * H, vv.data() + t * KVH * AHD);
     }
   }
+  prof_add(g_prof.attn_proj[l], pt); pt = prof_now();
   const float* qnw = m.T(LN(l, "self_attn.q_norm.weight")).f32();
   const float* knw = m.T(LN(l, "self_attn.k_norm.weight")).f32();
   auto rope = [&](float* vec, int nheads, int pos) {
@@ -197,29 +203,34 @@ static void attn_prefill_chunk(Model& m, int l, AttnState& st, int pos0,
     std::fill(attn.begin(), attn.end(), 0.f);
     const float* q = qg.data() + t * QPROJ;
     int len = pos0 + t + 1;
-    for (int h = 0; h < QH; h++) {
-      const float* qh = q + h * 2 * AHD;
-      int kvh = h / (QH / KVH);
-      std::vector<float> sc(len);
-      float mx = -1e30f;
-      for (int p = 0; p < len; p++) {
-        const float* kp = st.k.data() + (size_t)p * KVH * AHD + kvh * AHD;
-        float s = 0;
-        for (int i = 0; i < AHD; i++) s += qh[i] * kp[i];
-        sc[p] = s / sqrtf((float)AHD);
-        mx = std::max(mx, sc[p]);
+    auto run_heads = [&](int begin, int end) {
+      for (int h = begin; h < end; h++) {
+        const float* qh = q + h * 2 * AHD;
+        int kvh = h / (QH / KVH);
+        std::vector<float> sc(len);
+        float mx = -1e30f;
+        for (int p = 0; p < len; p++) {
+          const float* kp = st.k.data() + (size_t)p * KVH * AHD + kvh * AHD;
+          float s = 0;
+          for (int i = 0; i < AHD; i++) s += qh[i] * kp[i];
+          sc[p] = s / sqrtf((float)AHD);
+          mx = std::max(mx, sc[p]);
+        }
+        float sum = 0;
+        for (int p = 0; p < len; p++) { sc[p] = expf(sc[p] - mx); sum += sc[p]; }
+        for (int p = 0; p < len; p++) {
+          const float* vp = st.v.data() + (size_t)p * KVH * AHD + kvh * AHD;
+          float w = sc[p] / sum;
+          for (int i = 0; i < AHD; i++) attn[h * AHD + i] += w * vp[i];
+        }
+        const float* gate = q + h * 2 * AHD + AHD;
+        for (int i = 0; i < AHD; i++) attn[h * AHD + i] *= sigmoidf(gate[i]);
       }
-      float sum = 0;
-      for (int p = 0; p < len; p++) { sc[p] = expf(sc[p] - mx); sum += sc[p]; }
-      for (int p = 0; p < len; p++) {
-        const float* vp = st.v.data() + (size_t)p * KVH * AHD + kvh * AHD;
-        float w = sc[p] / sum;
-        for (int i = 0; i < AHD; i++) attn[h * AHD + i] += w * vp[i];
-      }
-      const float* gate = q + h * 2 * AHD + AHD;
-      for (int i = 0; i < AHD; i++) attn[h * AHD + i] *= sigmoidf(gate[i]);
-    }
+    };
+    m.pool.run([&](int id) { run_heads(id * QH / 2, (id + 1) * QH / 2); });
+    prof_add(g_prof.attn_state[l], pt); pt = prof_now();
     m.mv_out_prefill(m.T(LN(l, "self_attn.o_proj.weight")), attn.data(), dec.data());
+    prof_add(g_prof.attn_out[l], pt); pt = prof_now();
     for (int i = 0; i < H; i++) xout[t * H + i] = xin[t * H + i] + dec[i];
   }
 }
