@@ -225,22 +225,32 @@ static void cpu_prepare_pretiled(const BaaTensor& t) {
   }
 }
 
-static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y,
+struct CpuXbf4Activation {
+  std::vector<int8_t> q, xe, xo;
+  std::vector<float> sums;
+  std::vector<int> tile_sums;
+  float sx = 1.f;
+
+  explicit CpuXbf4Activation(int n) : q(n), xe(n / 2), xo(n / 2), sums(n / XBF_SB), tile_sums(n / 128) {}
+  void prepare(const float* x, int n) {
+    sx = quant_xq(x, n, q.data(), sums.data());
+    xq_split4(q.data(), n, xe.data(), xo.data());
+    for (int b = 0; b < n / 128; b++) {
+      tile_sums[b] = 0;
+      for (int i = 0; i < 128; i++) tile_sums[b] += q[b * 128 + i];
+    }
+  }
+};
+
+static void cpu_mv_pretiled_fast(const BaaTensor& t, const CpuXbf4Activation& a, float* y,
                                  Pool* pool, bool npu_semantics) {
   int N = (int)t.shape[0], K = (int)t.shape[1];
   cpu_prepare_pretiled(t);
-  std::vector<int8_t> q(K), xe(K / 2), xo(K / 2);
-  std::vector<float> sums(K / XBF_SB);
-  float sx = quant_xq(x, K, q.data(), sums.data());
-  xq_split4(q.data(), K, xe.data(), xo.data());
-  std::vector<int> tile_sums(K / 128);
-  for (int b = 0; b < K / 128; b++)
-    for (int i = 0; i < 128; i++) tile_sums[b] += q[b * 128 + i];
   auto run_rows = [&](const uint8_t* rows, int count, float* out) {
     if (npu_semantics)
-      gemv_xbf4_128_rows_npu(rows, count, K, xe.data(), xo.data(), tile_sums.data(), sx, out);
+      gemv_xbf4_128_rows_npu(rows, count, K, a.xe.data(), a.xo.data(), a.tile_sums.data(), a.sx, out);
     else
-      gemv_xbf4_128_rows(rows, count, K, xe.data(), xo.data(), tile_sums.data(), sx, out);
+      gemv_xbf4_128_rows(rows, count, K, a.xe.data(), a.xo.data(), a.tile_sums.data(), a.sx, out);
   };
   if (pool) {
     size_t row_bytes = (size_t)(K / 128) * 66;
@@ -251,6 +261,13 @@ static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y,
   } else {
     run_rows(t.cpu_rows.data(), N, y);
   }
+}
+
+static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y,
+                                 Pool* pool, bool npu_semantics) {
+  CpuXbf4Activation a((int)t.shape[1]);
+  a.prepare(x, (int)t.shape[1]);
+  cpu_mv_pretiled_fast(t, a, y, pool, npu_semantics);
 }
 
 // ---------------- GDN decode（linear_attn，照 qwen35moe/delta-net decode 数学） ----------------
@@ -267,8 +284,10 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
   float* fused_outputs[] = {qkv.data(), z.data()};
   NpuBackend::Job qjob;
   if (!env_flag("NPU_DECODE_PROJ")) {
-    cpu_mv_pretiled_fast(qw, xn.data(), qkv.data(), &m.pool, true);
-    cpu_mv_pretiled_fast(zw, xn.data(), z.data(), &m.pool, true);
+    CpuXbf4Activation a(H);
+    a.prepare(xn.data(), H);
+    cpu_mv_pretiled_fast(qw, a, qkv.data(), &m.pool, true);
+    cpu_mv_pretiled_fast(zw, a, z.data(), &m.pool, true);
     m.mv(m.T(LN(l, "linear_attn.in_proj_b.weight")), xn.data(), beta.data());
     m.mv(m.T(LN(l, "linear_attn.in_proj_a.weight")), xn.data(), alpha.data());
   } else if (m.npu && m.npu->ok && m.npu->gemv_fused(fused_weights, 2, xn.data(), fused_outputs)) {
@@ -408,9 +427,11 @@ static void attn_decode(Model& m, int l, AttnState& st, int pos, const float* xi
   float* fused_outputs[] = {qg.data(), kk.data(), vv.data()};
   NpuBackend::Job qjob;
   if (!env_flag("NPU_DECODE_PROJ")) {
-    cpu_mv_pretiled_fast(qw, xn.data(), qg.data(), &m.pool, true);
-    cpu_mv_pretiled_fast(kw, xn.data(), kk.data(), &m.pool, true);
-    cpu_mv_pretiled_fast(vw, xn.data(), vv.data(), &m.pool, true);
+    CpuXbf4Activation a(H);
+    a.prepare(xn.data(), H);
+    cpu_mv_pretiled_fast(qw, a, qg.data(), &m.pool, true);
+    cpu_mv_pretiled_fast(kw, a, kk.data(), &m.pool, true);
+    cpu_mv_pretiled_fast(vw, a, vv.data(), &m.pool, true);
   } else if (!env_flag("CPU_KV") && m.npu && m.npu->ok &&
       m.npu->gemv_fused(fused_weights, 3, xn.data(), fused_outputs,
                         env_flag_default("NPU_WIDE_ATTN") ? 12288 : 0)) {

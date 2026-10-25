@@ -150,6 +150,11 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   4 个专家并按原顺序归并。direct 仍使用两核 router。layer0/layer10 direct/scheduled 哈希一致；固定
   `ids=0..64` 的 65+64 IDs 一致，候选三轮平均 53.011/53.256/53.489ms，MoE 16.414/16.490/16.127ms，
   HEAD 对照为 53.306/55.483ms 与 17.454/18.225ms。25ms/token 尚未达到。
+- 2026-10-26 单行 XBF4 每次展开两个 128 块，独立执行整数点积和归约，但保持原 FP32/BF16
+  块序累加；NPU-equivalent BF16 舍入使用 Zen5 硬件指令。GDN qkv+z 与 attention q+k+v
+  复用同一次激活量化。固定 65+64 紧邻 A/B 平均 51.650→49.375ms，proj 17.289→15.152ms；
+  最终三轮 OUT_IDS 与 HEAD 一致，layer0/layer10 direct/scheduled 哈希一致，tests PASS、0 flake。
+  四块展开无继续收益，25ms/token 尚未达到。
 - CPU 激活量化、整数求和、偶奇/模4拆分已 AVX-512 化，单测与层对拍 PASS。
   GDN 状态更新与输出已融合，少读约 63MB/token；prefill 后 decode 实测最低约 67ms。
   当前约 1.78GB/token，CPU4+NPU 并发探针约 77GB/s；18ms 需约 99GB/s 且受逐层依赖限制。
