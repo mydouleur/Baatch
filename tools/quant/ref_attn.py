@@ -40,6 +40,7 @@ def main():
     ap.add_argument("--layer", type=int, default=3)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--ntok", type=int, default=4)
+    ap.add_argument("--sim-xbf4", action="store_true", help="XBF4 档张量先量化再反解")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     mr = ModelReader(a.src)
@@ -49,7 +50,22 @@ def main():
     rng = np.random.default_rng(a.seed)
     xs = rng.standard_normal((a.ntok, H)).astype(np.float32)
 
-    def T(n): return mr.read(P + n)
+    def T(n):
+        w = mr.read(P + n)
+        is_q4 = (n.endswith(".weight") and
+                 (n.startswith("self_attn.") or n.startswith("mlp.shared_expert.")
+                  or n.startswith("mlp.experts.")))
+        if a.sim_xbf4 and is_q4:
+            from baa_writer_v1 import quant_pack4
+            pk = np.frombuffer(quant_pack4(w.reshape(-1, w.shape[-1]).astype(np.float32)), dtype=np.uint8)
+            rows, K = int(np.prod(w.shape[:-1])), w.shape[-1]
+            pk = pk.reshape(rows, K//256, 130)
+            sc = pk[..., 0].astype(np.uint16) | (pk[..., 1].astype(np.uint16) << 8)
+            sf = (sc.astype(np.uint32) << 16).view(np.float32)
+            nib = pk[..., 2:]
+            q = np.stack([nib & 0xF, nib >> 4], axis=-1).reshape(rows, K//256, 256).astype(np.int16) - 8
+            w = (q * sf[..., None]).reshape(w.shape)
+        return w
 
     Wq, Wk, Wv, Wo = T("self_attn.q_proj.weight"), T("self_attn.k_proj.weight"), T("self_attn.v_proj.weight"), T("self_attn.o_proj.weight")
     ln1 = T("input_layernorm.weight")

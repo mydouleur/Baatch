@@ -79,12 +79,20 @@ def scheme_of(n, layer):
         return SCHEME_BF16 if n.startswith("mtp.") else SCHEME_F32
     return SCHEME_XBF4
 
-def pack4_pretiled(w2d):
+def pack4_pretiled(w2d, physical_k=None, physical_n=None):
     """XBF4 + TileFuse 预平铺（gemv_w4a16/test.cpp 布局）：大瓦片 128(K)x64(N)
     = 4096B 权重 + 128B bf16 scale + 128B zp（zp=8 常数，对称量化）；
     大瓦片 col_mod(=lt_col%8) → lt_col → ltr 主序；小瓦片 8x8 行主序 lo|hi<<4。
-    w2d: [N, K] fp32（行=输出）。返回 bytes。"""
+    w2d: [N, K] fp32（行=输出）。目录保存逻辑形状，物理形状可补零。"""
     N, K = w2d.shape
+    physical_N = physical_n or (N + 2047) // 2048 * 2048
+    physical_K = physical_k or K
+    assert physical_N >= N and physical_K >= K
+    if physical_N != N or physical_K != K:
+        padded = np.zeros((physical_N, physical_K), dtype=np.float32)
+        padded[:N, :K] = w2d
+        w2d = padded
+        N, K = physical_N, physical_K
     LT_K, LT_N, NCOL = 128, 64, 8
     # 量化（与 quant_pack4 同参：absmax/8，clip [-8,7]，field=q+8）
     b = w2d.reshape(N, K // 256, 256)
@@ -116,6 +124,10 @@ def main():
     ap.add_argument("--src", default=r"D:\xdna_llm\models\Ornith-1.5-35B-A3B")
     ap.add_argument("--out", default="models/ornith35_xbf24.baa")
     ap.add_argument("--only", default=None)
+    ap.add_argument("--npu-layout", choices=("qkv", "fast", "dense", "balanced", "uniform"), default="qkv",
+                    help="qkv/fast：少形状过渡；dense：密集多形状；balanced：适度补齐减少切换；uniform：统一形状实验")
+    ap.add_argument("--npu-xbf4-experts", action="store_true",
+                    help="XBF4 routed experts 也使用 NPU 预平铺；XBF2 保持 CPU 行主序")
     a = ap.parse_args()
 
     mr = ModelReader(a.src)
@@ -131,7 +143,8 @@ def main():
         "chat_template_ref": "chat_template.jinja",
         "quant": {"scheme": "XBF24 v1 mix", "path": "naive symmetric absmax (no imatrix)",
                   "xbf4": "absmax/8, nibble lo|hi<<4", "xbf2": "absmax/2, 4 vals/byte",
-                  "mix": "experts L10-29 XBF2 else XBF4; dense XBF4; router/SSM/norm F32"},
+                  "mix": "experts L10-29 XBF2 else XBF4; dense XBF4; router/SSM/norm F32",
+                  "npu_layout": a.npu_layout, "npu_xbf4_experts": a.npu_xbf4_experts},
     }
 
     # 展开为目录项列表（专家 3D 拆专家粒度）
@@ -155,24 +168,38 @@ def main():
     entries.sort(key=lambda e: e[0])   # 目录按 name 排序（不变量）
     print(f"{len(entries)} dir entries (from {len(names)} tensors)")
 
-    # 布局：仅 (N,K)=(8192,2048) 密集张量（in_proj_qkv / q_proj，每 token 40 次调用
-    # 同形状零切换）→ TileFuse 预平铺 + NPU；其余 XBF4/XBF2 行主序（CPU vnni4/vnni2
-    # 快速路径不变）。flags bit0=预平铺。（保留字节 offset7 复用，已向主线报告）
-    # 取证：xclbin 切换 2.6ms/次（bench_switch.exe），多形状交替把 decode 拖到 600ms/token。
+    qkv_shapes = {(8192, 2048)}
+    fast_shapes = qkv_shapes | {(4096, 2048), (248320, 2048)}
+    dense_shapes = fast_shapes | {(2048, 4096), (2048, 512), (512, 2048)}
+    npu_shapes = qkv_shapes if a.npu_layout == "qkv" else fast_shapes if a.npu_layout == "fast" else dense_shapes
     data_off = 0
     for e in entries:
         sch = e[1]; shape = e[2]
         nel = int(np.prod(shape))
         is_expert = ".experts." in e[0]
-        pretiled = (sch == SCHEME_XBF4 and not is_expert and len(shape) == 2
-                    and tuple(shape) == (8192, 2048))
+        expert_npu = (a.npu_xbf4_experts and is_expert and sch == SCHEME_XBF4
+                      and tuple(shape) in {(1024, 2048), (2048, 512)})
+        pretiled = (sch == SCHEME_XBF4 and len(shape) == 2 and
+                    (expert_npu or (not is_expert and e[0] != "embed_tokens"
+                                    and tuple(shape) in npu_shapes)))
+        uniform = a.npu_layout == "uniform" and pretiled and e[0] != "lm_head.weight"
+        balanced_small = (a.npu_layout == "balanced" and pretiled
+                          and tuple(shape) in {(2048, 512), (512, 2048)})
+        balanced_wide = (a.npu_layout == "balanced" and pretiled
+                         and tuple(shape) == (2048, 4096))
+        physical_k = (4096 if uniform else 2048 if balanced_small else shape[1]) if pretiled else 0
+        physical_n = (8192 if uniform or balanced_wide else 2048 if balanced_small
+                      else (shape[0] + 2047) // 2048 * 2048) if pretiled else 0
+        flags = ((1 if pretiled else 0) | (2 if uniform else 0)
+                 | (4 if balanced_small else 0) | (8 if balanced_wide else 0))
         if sch == SCHEME_BF16: psz = nel * 2
         elif sch == SCHEME_F32: psz = nel * 4
-        elif sch == SCHEME_XBF4 and pretiled: psz = (shape[1] // 128) * (shape[0] // 64) * 4352
+        elif sch == SCHEME_XBF4 and pretiled:
+            psz = (physical_k // 128) * (physical_n // 64) * 4352
         elif sch == SCHEME_XBF4: psz = (nel // BLK) * 130
         else: psz = (nel // BLK) * 66
         data_off = (data_off + 255) & ~255
-        e += [psz, data_off, 1 if pretiled else 0]
+        e += [psz, data_off, flags]
         data_off += psz
 
     pool = bytearray()
@@ -209,7 +236,9 @@ def main():
                 f.write(np.ascontiguousarray(w, dtype=np.float32).tobytes())
             elif sch == SCHEME_XBF4 and flags:
                 try:
-                    f.write(pack4_pretiled(w.astype(np.float32)))
+                    physical_k = 4096 if flags & 2 else 2048 if flags & 4 else shape[1]
+                    physical_n = 8192 if flags & (2 | 8) else 2048 if flags & 4 else None
+                    f.write(pack4_pretiled(w.astype(np.float32), physical_k, physical_n))
                 except Exception as ex:
                     print("PRETILE FAIL on", nn, "shape", w.shape, ":", ex, flush=True)
                     raise

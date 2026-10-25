@@ -64,12 +64,14 @@ struct Model {
   }
   void mv_named(const BaaTensor& w, const std::string& name, const float* x, float* y) {
     int R = (int)w.shape[w.ndim - 2], C = (int)w.shape[w.ndim - 1];
-    if (w.scheme == 3 && (w.flags & 1) && npu && npu->ok) {
+    bool expert_npu = npu && npu->xbf4_experts && name.find(".experts.") != std::string::npos;
+    if (w.scheme == 3 && ((w.flags & 1) || expert_npu) && npu && npu->ok) {
       if (npu->gemv(w, x, y)) return;
-      // flake 重试耗尽/挂起 → CPU 兜底（需 CPU 读预平铺——见 npu 注记）
-      fprintf(stderr, "[npu] fallback CPU for %s\n", name.c_str());
-      cpu_mv_pretiled(w, x, y);
-      return;
+      if (w.flags & 1) {
+        fprintf(stderr, "[npu] fallback CPU for %s\n", name.c_str());
+        cpu_mv_pretiled(w, x, y);
+        return;
+      }
     }
     if (w.scheme == 3 && (w.flags & 1)) { cpu_mv_pretiled(w, x, y); return; }
     if (w.scheme == 0) { gemv_bf16(pool, w.bf16(), R, C, x, y); return; }
@@ -99,6 +101,25 @@ struct Model {
     }
     throw std::runtime_error("unsupported scheme");
   }
+  void mv_xbf2_quantized(const BaaTensor& w, const int8_t* xq4,
+                         const float* sumxq, float sx, float* y) {
+    int R = (int)w.shape[0], C = (int)w.shape[1];
+    const int8_t* q4[4] = {xq4, xq4 + C/4, xq4 + C/2, xq4 + 3*C/4};
+    int half = (R / 2 + 15) & ~15;
+    pool.run([&](int id) {
+      if (id == 0) gemv_xbf2_rows(w.data, 0, half, C, q4, sumxq, sx, y);
+      else gemv_xbf2_rows(w.data, half, R - half, C, q4, sumxq, sx, y);
+    });
+  }
+  bool npu_submit(const BaaTensor& w, const float* x, float* y, NpuBackend::Job& j) {
+    return w.scheme == 3 && (w.flags & 1) && npu && npu->ok && npu->submit(w, x, y, j);
+  }
+  void npu_finish(const BaaTensor& w, const float* x, float* y,
+                  NpuBackend::Job& j, const char* name) {
+    if (npu->wait(j)) return;
+    fprintf(stderr, "[npu] fallback CPU for %s\n", name);
+    cpu_mv_pretiled(w, x, y);
+  }
   // 专家 GEMV：v1 容器已按专家拆目录项，e 由调用方拼进名字——此接口仅兼容旧调用
   void mv_xbf3(const BaaTensor& t, int e, const float* x, float* y) { mv(t, x, y); }
   // scheme 感知 RMSNorm
@@ -111,12 +132,15 @@ struct Model {
 // CPU 读 TileFuse 预平铺 X4（fallback/对拍路径，非热路径）
 static void cpu_mv_pretiled(const BaaTensor& t, const float* x, float* y) {
   int N = (int)t.shape[0], K = (int)t.shape[1];
+  int physical_K = (t.flags & 2) ? 4096 : (t.flags & 4) ? 2048 : K;
+  int physical_N = (t.flags & 2) || (t.flags & 8) ? 8192 : (t.flags & 4) ? 2048 : (N + 2047) & ~2047;
   for (int n = 0; n < N; n++) y[n] = 0.f;
   const uint8_t* tiles = t.data;
-  int nlt_col = N / 64, idx = 0;
+  int nlt_col = physical_N / 64, idx = 0;
   for (int cm = 0; cm < 8; cm++)
     for (int lt_col = cm; lt_col < nlt_col; lt_col += 8)
-      for (int ltr = 0; ltr < K / 128; ltr++, idx++) {
+      for (int ltr = 0; ltr < physical_K / 128; ltr++, idx++) {
+        if (lt_col >= N / 64) continue;
         const uint8_t* tp = tiles + (size_t)idx * 4352;
         const uint8_t* wpk = tp;
         const uint16_t* sc = (const uint16_t*)(tp + 4096);
@@ -128,9 +152,11 @@ static void cpu_mv_pretiled(const BaaTensor& t, const float* x, float* y) {
                 uint8_t byte = sp[(i * 8 + j) / 2];
                 int k0 = ltr * 128 + str * 8 + i;
                 int n0 = lt_col * 64 + stc * 8 + j;
-                float s2 = bf16_to_f32(sc[stc * 8 + j]);
-                y[n0]     += ((int)(byte & 0xF) - 8) * s2 * x[k0];
-                y[n0 + 1] += ((int)(byte >> 4) - 8) * s2 * x[k0];
+                if (k0 >= K) continue;
+                float s0 = bf16_to_f32(sc[stc * 8 + j]);
+                float s1 = bf16_to_f32(sc[stc * 8 + j + 1]);
+                y[n0]     += ((int)(byte & 0xF) - 8) * s0 * x[k0];
+                y[n0 + 1] += ((int)(byte >> 4) - 8) * s1 * x[k0];
               }
           }
       }
@@ -138,13 +164,29 @@ static void cpu_mv_pretiled(const BaaTensor& t, const float* x, float* y) {
 
 // ---------------- GDN decode（linear_attn，照 qwen35moe/delta-net decode 数学） ----------------
 static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* xout) {
+  if (getenv("TRACE")) fprintf(stderr, "gdn %d start\n", l);
   using namespace Cfg;
   std::vector<float> xn(H), qkv(QKV_DIM), z(VAL_DIM), beta(VH), alpha(VH);
   m.nrm(m.T(LN(l, "input_layernorm.weight")), xin, H, xn.data(), true);
-  m.mv(m.T(LN(l, "linear_attn.in_proj_qkv.weight")), xn.data(), qkv.data());
-  m.mv(m.T(LN(l, "linear_attn.in_proj_z.weight")), xn.data(), z.data());
-  m.mv(m.T(LN(l, "linear_attn.in_proj_b.weight")), xn.data(), beta.data());
-  m.mv(m.T(LN(l, "linear_attn.in_proj_a.weight")), xn.data(), alpha.data());
+  if (getenv("TRACE")) fprintf(stderr, "gdn %d norm done\n", l);
+  const auto& qw = m.T(LN(l, "linear_attn.in_proj_qkv.weight"));
+  NpuBackend::Job qjob;
+  if (m.npu_submit(qw, xn.data(), qkv.data(), qjob)) {
+    m.mv(m.T(LN(l, "linear_attn.in_proj_b.weight")), xn.data(), beta.data());
+    m.mv(m.T(LN(l, "linear_attn.in_proj_a.weight")), xn.data(), alpha.data());
+    m.npu_finish(qw, xn.data(), qkv.data(), qjob, "in_proj_qkv");
+    m.mv(m.T(LN(l, "linear_attn.in_proj_z.weight")), xn.data(), z.data());
+  } else {
+    m.mv(qw, xn.data(), qkv.data());
+    if (getenv("TRACE")) fprintf(stderr, "gdn %d qkv done\n", l);
+    m.mv(m.T(LN(l, "linear_attn.in_proj_z.weight")), xn.data(), z.data());
+    if (getenv("TRACE")) fprintf(stderr, "gdn %d z done\n", l);
+    m.mv(m.T(LN(l, "linear_attn.in_proj_b.weight")), xn.data(), beta.data());
+    if (getenv("TRACE")) fprintf(stderr, "gdn %d b done\n", l);
+    m.mv(m.T(LN(l, "linear_attn.in_proj_a.weight")), xn.data(), alpha.data());
+    if (getenv("TRACE")) fprintf(stderr, "gdn %d a done\n", l);
+  }
+  if (getenv("TRACE")) fprintf(stderr, "gdn %d projections done\n", l);
   const float* dt_b = m.T(LN(l, "linear_attn.dt_bias")).f32();
   const float* a_log = m.T(LN(l, "linear_attn.A_log")).f32();
   float g[VH];
@@ -164,6 +206,7 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
     for (int t = 0; t < 4; t++) s += window[t] * cw[c * 4 + t];
     qc[c] = siluf(s);
   }
+  if (getenv("TRACE")) fprintf(stderr, "gdn %d conv done\n", l);
   // conv state 左移
   memcpy(st.conv.data(), st.conv.data() + QKV_DIM, 2 * QKV_DIM * 4);
   memcpy(st.conv.data() + 2 * QKV_DIM, qkv.data(), QKV_DIM * 4);
@@ -232,6 +275,7 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
   std::vector<float> dec(H);
   m.mv(m.T(LN(l, "linear_attn.out_proj.weight")), og.data(), dec.data());
   for (int i = 0; i < H; i++) xout[i] = xin[i] + dec[i];
+  if (getenv("TRACE")) fprintf(stderr, "gdn %d done\n", l);
 }
 
 // ---------------- 全注意力 decode ----------------
@@ -239,9 +283,20 @@ static void attn_decode(Model& m, int l, AttnState& st, int pos, const float* xi
   using namespace Cfg;
   std::vector<float> xn(H), qg(QPROJ), kk(KVH * AHD), vv(KVH * AHD);
   m.nrm(m.T(LN(l, "input_layernorm.weight")), xin, H, xn.data(), true);
-  m.mv(m.T(LN(l, "self_attn.q_proj.weight")), xn.data(), qg.data());
-  m.mv(m.T(LN(l, "self_attn.k_proj.weight")), xn.data(), kk.data());
-  m.mv(m.T(LN(l, "self_attn.v_proj.weight")), xn.data(), vv.data());
+  const auto& qw = m.T(LN(l, "self_attn.q_proj.weight"));
+  const auto& kw = m.T(LN(l, "self_attn.k_proj.weight"));
+  const auto& vw = m.T(LN(l, "self_attn.v_proj.weight"));
+  bool kv_cpu = !((kw.flags & 1) || (vw.flags & 1));
+  NpuBackend::Job qjob;
+  if (kv_cpu && m.npu_submit(qw, xn.data(), qg.data(), qjob)) {
+    m.mv(kw, xn.data(), kk.data());
+    m.mv(vw, xn.data(), vv.data());
+    m.npu_finish(qw, xn.data(), qg.data(), qjob, "q_proj");
+  } else {
+    m.mv(qw, xn.data(), qg.data());
+    m.mv(kw, xn.data(), kk.data());
+    m.mv(vw, xn.data(), vv.data());
+  }
   const float* qnw = m.T(LN(l, "self_attn.q_norm.weight")).f32();
   const float* knw = m.T(LN(l, "self_attn.k_norm.weight")).f32();
   // 逐头 RMSNorm（Q 用前半 256，gate 后半）
@@ -331,28 +386,44 @@ static void moe(Model& m, int l, const float* xin, float* xout) {
     static bool dbg = getenv("MOE_DBG") != nullptr;
     if (dbg) { fprintf(stderr, "  top8 L%d:", l); for (int t = 0; t < TOPK; t++) fprintf(stderr, " %d(%.3f)", top[t], tw[t]); fprintf(stderr, "\n"); }
   }
+  auto prof0 = std::chrono::steady_clock::now();
   // v1 容器：专家按粒度独立目录项（layers.N.mlp.experts.gate_up_proj.{e}），
   // scheme 逐专家读取——禁止按层假设统一位宽（docs v1 定案）
   std::vector<float> acc(H, 0.f), guv(2 * MI), hd(MI), dov(H);
   char nmbuf[160];
   for (int t = 0; t < TOPK; t++) {
     snprintf(nmbuf, 160, "layers.%d.mlp.experts.gate_up_proj.%d", l, top[t]);
-    m.mv(m.T(nmbuf), xn.data(), guv.data());
+    m.mv_named(m.T(nmbuf), nmbuf, xn.data(), guv.data());
     for (int i = 0; i < MI; i++) {
-      float g = guv[i], u = guv[MI + i];      // 前半 gate、后半 up
+      float g = guv[i], u = guv[MI + i];
       hd[i] = siluf(g) * u;
     }
     snprintf(nmbuf, 160, "layers.%d.mlp.experts.down_proj.%d", l, top[t]);
-    m.mv(m.T(nmbuf), hd.data(), dov.data());
+    m.mv_named(m.T(nmbuf), nmbuf, hd.data(), dov.data());
     for (int i = 0; i < H; i++) acc[i] += tw[t] * dov[i];
   }
+  auto prof1 = std::chrono::steady_clock::now();
   // 共享专家（dense SwiGLU + sigmoid 门）
   std::vector<float> sg(MI), su(MI), sh(H), sgate(1);
   m.mv(m.T(LN(l, "mlp.shared_expert.gate_proj.weight")), xn.data(), sg.data());
   m.mv(m.T(LN(l, "mlp.shared_expert.up_proj.weight")), xn.data(), su.data());
   for (int i = 0; i < MI; i++) sg[i] = siluf(sg[i]) * su[i];
-  m.mv(m.T(LN(l, "mlp.shared_expert.down_proj.weight")), sg.data(), sh.data());
-  m.mv(m.T(LN(l, "mlp.shared_expert_gate.weight")), xn.data(), sgate.data());
+  const auto& sdw = m.T(LN(l, "mlp.shared_expert.down_proj.weight"));
+  NpuBackend::Job sdjob;
+  if (m.npu_submit(sdw, sg.data(), sh.data(), sdjob)) {
+    m.mv(m.T(LN(l, "mlp.shared_expert_gate.weight")), xn.data(), sgate.data());
+    m.npu_finish(sdw, sg.data(), sh.data(), sdjob, "shared_expert.down_proj");
+  } else {
+    m.mv(sdw, sg.data(), sh.data());
+    m.mv(m.T(LN(l, "mlp.shared_expert_gate.weight")), xn.data(), sgate.data());
+  }
+  static bool prof = getenv("MOE_PROF") != nullptr;
+  if (prof) {
+    auto prof2 = std::chrono::steady_clock::now();
+    fprintf(stderr, "[moe] L%d routed=%.2fms shared=%.2fms\n", l,
+            std::chrono::duration<double>(prof1 - prof0).count() * 1e3,
+            std::chrono::duration<double>(prof2 - prof1).count() * 1e3);
+  }
   float g0 = sigmoidf(sgate[0]);
   for (int i = 0; i < H; i++) xout[i] = xin[i] + acc[i] + g0 * sh[i];
 }

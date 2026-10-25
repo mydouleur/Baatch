@@ -22,21 +22,58 @@
 #include <chrono>
 
 struct NpuBackend {
+  struct Weight {
+    xrt::bo bo;
+    size_t bytes;
+    uint64_t last;
+    bool pinned;
+  };
   struct Shape {
+    std::shared_ptr<xrt::hw_context> hw;
     xrt::kernel kernel;
     xrt::bo bi, ba, bc;
     unsigned instr_words;
     int K, N;
-    std::map<const void*, xrt::bo> bcache;   // 权重 BO 按容器数据指针缓存（加载一次）
+    std::map<const void*, Weight> bcache;
   };
   xrt::device dev{0};
   std::map<uint64_t, std::shared_ptr<Shape>> shapes;   // key = K<<32|N
   bool ok = false;
+  bool xbf4_experts = false;
   long runs = 0, flakes = 0;
   std::string dir;
   std::vector<int16_t> aq;
+  size_t cached_bytes = 0, pinned_bytes = 0;
+  size_t bo_budget = 3ull * 1024 * 1024 * 1024;
+  uint64_t cache_clock = 0;
+  long bo_hits = 0, bo_misses = 0, shape_switches = 0;
+  double pack_ms = 0, submit_ms = 0, wait_ms = 0, sync_ms = 0;
+  uint64_t physical_weight_bytes = 0;
+  Shape* last_shape = nullptr;
 
-  void init(const std::string& d) { dir = d; ok = true; }
+  void init(const std::string& d, bool experts = false) {
+    dir = d; xbf4_experts = experts; ok = true;
+    if (const char* mb = getenv("NPU_BO_MB")) bo_budget = strtoull(mb, nullptr, 10) * 1024 * 1024;
+  }
+  void reset_stats() {
+    runs = flakes = bo_hits = bo_misses = shape_switches = 0;
+    pack_ms = submit_ms = wait_ms = sync_ms = 0;
+    physical_weight_bytes = 0; last_shape = nullptr;
+  }
+  void print_stats() const {
+    printf("[npu-stats] runs=%ld flakes=%ld switches=%ld bo_hit=%ld bo_miss=%ld "
+           "pack_ms=%.3f submit_ms=%.3f wait_ms=%.3f sync_ms=%.3f weight_MB=%.3f "
+           "expert_cache_MB=%.3f pinned_MB=%.3f budget_MB=%.3f\n",
+           runs, flakes, shape_switches, bo_hits, bo_misses, pack_ms, submit_ms, wait_ms,
+           sync_ms, physical_weight_bytes / 1e6, cached_bytes / 1e6, pinned_bytes / 1e6,
+           bo_budget / 1e6);
+  }
+  template <typename Direction>
+  void sync_bo(xrt::bo& b, Direction direction) {
+    auto t0 = std::chrono::steady_clock::now();
+    b.sync(direction);
+    sync_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+  }
 
   Shape& shape_for(int K, int N) {
     uint64_t key = (uint64_t)K << 32 | (unsigned)N;
@@ -50,11 +87,11 @@ struct NpuBackend {
     std::vector<char> inst(n); f.read(inst.data(), n);
     auto xcl = xrt::xclbin(base + ".xclbin");
     auto uuid = dev.register_xclbin(xcl);
-    xrt::hw_context* hw = new xrt::hw_context(dev, uuid);   // 常驻（泄漏可接受）
-    s->kernel = xrt::kernel(*hw, "MLIR_AIE");
+    s->hw = std::make_shared<xrt::hw_context>(dev, uuid);
+    s->kernel = xrt::kernel(*s->hw, "MLIR_AIE");
     s->bi = xrt::bo(dev, inst.size(), XCL_BO_FLAGS_CACHEABLE, s->kernel.group_id(1));
     memcpy(s->bi.map(), inst.data(), inst.size());
-    s->bi.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+    sync_bo(s->bi, XCL_BO_SYNC_BO_TO_DEVICE);
     s->ba = xrt::bo(dev, K * 2, XRT_BO_FLAGS_HOST_ONLY, s->kernel.group_id(3));
     s->bc = xrt::bo(dev, N * 2, XRT_BO_FLAGS_HOST_ONLY, s->kernel.group_id(5));
     s->instr_words = inst.size() / 4; s->K = K; s->N = N;
@@ -63,58 +100,187 @@ struct NpuBackend {
     return *s;
   }
 
-  xrt::bo& bo_for(Shape& s, const BaaTensor& t) {
-    auto it = s.bcache.find(t.data);
-    if (it != s.bcache.end()) return it->second;
-    xrt::bo b(dev, t.size, XRT_BO_FLAGS_HOST_ONLY, s.kernel.group_id(4));
-    memcpy(b.map(), t.data, t.size);
-    b.sync(XCL_BO_SYNC_BO_TO_DEVICE);
-    auto r = s.bcache.emplace(t.data, std::move(b));
-    return r.first->second;
+  static void pack_expert_range(const BaaTensor& t, uint8_t* out, int physical_N,
+                                int physical_K, int cm_begin, int cm_end) {
+    int N = (int)t.shape[0], K = (int)t.shape[1];
+    size_t sb_per_row = K / 256;
+    size_t idx = (size_t)cm_begin * (physical_N / 512) * (physical_K / 128);
+    for (int cm = cm_begin; cm < cm_end; cm++)
+      for (int lt = cm; lt < physical_N / 64; lt += 8)
+        for (int ltr = 0; ltr < physical_K / 128; ltr++, idx++) {
+          uint8_t* tp = out + idx * 4352;
+          memset(tp + 4096, 0, 128);
+          memset(tp + 4224, 8, 128);
+          if (ltr * 128 >= K) continue;
+          for (int str = 0; str < 16; str++)
+            for (int stc = 0; stc < 8; stc++) {
+              uint64_t packed[4] = {};
+              for (int j = 0; j < 8; j++) {
+                int n = lt * 64 + stc * 8 + j;
+                uint32_t w = 0x88888888;
+                if (n < N) {
+                  const uint8_t* src = t.data + ((size_t)n * sb_per_row + ltr / 2) * 130;
+                  if (str == 0) memcpy(tp + 4096 + (stc * 8 + j) * 2, src, 2);
+                  memcpy(&w, src + 2 + (ltr % 2) * 64 + str * 4, 4);
+                }
+                for (int b = 0; b < 4; b++) {
+                  uint64_t v = (w >> (b * 8)) & 0xFF;
+                  packed[b] |= (v & 0xF) << (j * 4);
+                  packed[b] |= (v >> 4) << (j * 4 + 32);
+                }
+              }
+              memcpy(tp + (str * 8 + stc) * 32, packed, sizeof(packed));
+            }
+        }
   }
 
-  // y = W_pretiled(N,K) @ x × sx；flake（整块 0）重试 ≤3
-  bool gemv(const BaaTensor& t, const float* x, float* y) {
-    int N = (int)t.shape[0], K = (int)t.shape[1];
-    Shape& s = shape_for(K, N);
-    xrt::bo& bb = bo_for(s, t);
-    aq.resize(K);
-    float amax = 0;
-    for (int i = 0; i < K; i++) amax = std::max(amax, fabsf(x[i]));
-    float sx = std::max(amax / 127.f, 1e-12f);
-    for (int i = 0; i < K; i++) {
-      int v = (int)lroundf(x[i] / sx);
-      aq[i] = (int16_t)std::max(-128, std::min(127, v));
+  static void pack_expert(const BaaTensor& t, uint8_t* out, int physical_N, int physical_K = 0) {
+    int K = (int)t.shape[1];
+    if (!physical_K) physical_K = K;
+    size_t bytes = (size_t)(physical_K / 128) * (physical_N / 64) * 4352;
+    memset(out, 0x88, bytes);
+    std::thread worker([&] { pack_expert_range(t, out, physical_N, physical_K, 4, 8); });
+    pack_expert_range(t, out, physical_N, physical_K, 0, 4);
+    worker.join();
+  }
+
+  xrt::bo& bo_for(Shape& s, const BaaTensor& t) {
+    auto it = s.bcache.find(t.data);
+    if (it != s.bcache.end()) {
+      bo_hits++;
+      it->second.last = ++cache_clock;
+      return it->second.bo;
     }
-    memcpy(s.ba.map(), aq.data(), K * 2);
-    s.ba.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+    bo_misses++;
+    bool pinned = (t.flags & 1) != 0;
+    size_t bytes = pinned ? t.size : (size_t)(s.K / 128) * (s.N / 64) * 4352;
+    if (pinned && pinned_bytes + cached_bytes + bytes > bo_budget)
+      throw std::runtime_error("npu BO budget exceeded by pinned weights");
+    while (!pinned && (cached_bytes + bytes > 512ull * 1024 * 1024 ||
+                       pinned_bytes + cached_bytes + bytes > bo_budget)) {
+      Shape* oldest_shape = nullptr;
+      const void* oldest_key = nullptr;
+      uint64_t oldest = ~0ull;
+      for (auto& [key, shape] : shapes)
+        for (auto& [ptr, w] : shape->bcache)
+          if (!w.pinned && w.last < oldest) {
+            oldest = w.last; oldest_shape = shape.get(); oldest_key = ptr;
+          }
+      if (!oldest_shape) throw std::runtime_error("npu expert cache entry too large");
+      cached_bytes -= oldest_shape->bcache.at(oldest_key).bytes;
+      oldest_shape->bcache.erase(oldest_key);
+    }
+    xrt::bo b(dev, bytes, XRT_BO_FLAGS_HOST_ONLY, s.kernel.group_id(4));
+    auto t0 = std::chrono::steady_clock::now();
+    if (pinned) memcpy(b.map(), t.data, t.size);
+    else pack_expert(t, static_cast<uint8_t*>(b.map()), s.N, s.K);
+    pack_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+    sync_bo(b, XCL_BO_SYNC_BO_TO_DEVICE);
+    if (pinned) pinned_bytes += bytes;
+    else cached_bytes += bytes;
+    Weight w{std::move(b), bytes, ++cache_clock, pinned};
+    auto r = s.bcache.emplace(t.data, std::move(w));
+    return r.first->second.bo;
+  }
+
+  struct Job {
+    Shape* shape;
+    xrt::bo* weights;
+    float* y;
+    float sx;
+    int N, physical_N;
+    std::unique_ptr<xrt::run> run;
+  };
+  bool busy = false;
+
+  void launch(Job& j) {
+    Shape& s = *j.shape;
+    memset(s.bc.map(), 0, j.physical_N * 2);
+    sync_bo(s.bc, XCL_BO_SYNC_BO_TO_DEVICE);
+    j.run = std::make_unique<xrt::run>(s.kernel);
+    j.run->set_arg(0, 3);
+    j.run->set_arg(1, s.bi); j.run->set_arg(2, s.instr_words);
+    j.run->set_arg(3, s.ba); j.run->set_arg(4, *j.weights); j.run->set_arg(5, s.bc);
+    j.run->start();
+  }
+
+  // 同一时刻只允许一个未完成任务，避免多个 context 并发提交。
+  bool submit(const BaaTensor& t, const float* x, float* y, Job& j) {
+    if (busy) throw std::runtime_error("npu submit while busy");
+    auto t0 = std::chrono::steady_clock::now();
+    int K = (int)t.shape[1];
+    aq.resize(K);
+    float sx = quant_xq16(x, K, aq.data());
+    submit_quantized(t, K, aq.data(), sx, y, j);
+    submit_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+    return true;
+  }
+
+  bool submit_quantized(const BaaTensor& t, int K, const int16_t* q, float sx, float* y, Job& j) {
+    auto t0 = std::chrono::steady_clock::now();
+    if (busy) throw std::runtime_error("npu submit while busy");
+    int N = (int)t.shape[0];
+    int physical_K = (t.flags & 2) ? 4096 : (t.flags & 4) || (!(t.flags & 1) && K == 512) ? 2048 : K;
+    int physical_N = (t.flags & 2) || (t.flags & 8) ? 8192 : (t.flags & 4) ? 2048 : (N + 2047) & ~2047;
+    Shape& s = shape_for(physical_K, physical_N);
+    if (last_shape && last_shape != &s) shape_switches++;
+    last_shape = &s;
+    physical_weight_bytes += (t.flags & 1) ? t.size : (size_t)(s.K / 128) * (s.N / 64) * 4352;
+    xrt::bo& bb = bo_for(s, t);
+    memset(s.ba.map(), 0, physical_K * 2);
+    memcpy(s.ba.map(), q, K * 2);
+    sync_bo(s.ba, XCL_BO_SYNC_BO_TO_DEVICE);
+    j.shape = &s; j.weights = &bb; j.y = y; j.sx = sx;
+    j.N = N; j.physical_N = physical_N;
+    busy = true;
+    launch(j);
+    submit_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+    return true;
+  }
+
+  bool gemv_quantized(const BaaTensor& t, int K, const int16_t* q, float sx, float* y) {
+    Job j;
+    submit_quantized(t, K, q, sx, y, j);
+    return wait(j);
+  }
+
+  bool wait(Job& j) {
+    auto t0 = std::chrono::steady_clock::now();
+    Shape& s = *j.shape;
     for (int att = 0; att < 4; att++) {
-      memset(s.bc.map(), 0, N * 2);
-      s.bc.sync(XCL_BO_SYNC_BO_TO_DEVICE);
-      xrt::run run{s.kernel};
-      run.set_arg(0, 3);
-      run.set_arg(1, s.bi); run.set_arg(2, s.instr_words);
-      run.set_arg(3, s.ba); run.set_arg(4, bb); run.set_arg(5, s.bc);
-      run.start();
-      try { run.wait2(); }
+      try { j.run->wait2(); }
       catch (const std::exception& e) {
         fprintf(stderr, "[npu] run 超时/挂起：%s — 不重试（看门狗语义）\n", e.what());
         runs++;
+        ok = false; busy = false;
+        wait_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
         return false;
       }
       runs++;
-      s.bc.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+      sync_bo(s.bc, XCL_BO_SYNC_BO_FROM_DEVICE);
       const uint16_t* c = (const uint16_t*)s.bc.map();
       bool allzero = true;
-      for (int i = 0; i < N; i++) if (c[i] != 0) { allzero = false; break; }
+      for (int i = 0; i < j.N; i++) if (c[i] != 0) { allzero = false; break; }
       if (!allzero) {
-        for (int i = 0; i < N; i++) y[i] = bf16_to_f32(c[i]) * sx;
+        for (int i = 0; i < j.N; i++) j.y[i] = bf16_to_f32(c[i]) * j.sx;
+        busy = false;
+        wait_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
         return true;
       }
       flakes++;
+      if (att != 3) launch(j);
     }
     fprintf(stderr, "[npu] flake ×4（记数继续）\n");
+    busy = false;
+    wait_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
     return false;
+  }
+
+  // 预平铺物理 N 补齐到 2048；目录和 y 仍使用逻辑 N。
+  bool gemv(const BaaTensor& t, const float* x, float* y) {
+    Job j;
+    submit(t, x, y, j);
+    return wait(j);
   }
   ~NpuBackend() {
     if (runs) fprintf(stderr, "[npu] runs=%ld flakes=%ld (%.2f%%)\n", runs, flakes, 100.0 * flakes / runs);

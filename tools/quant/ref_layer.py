@@ -49,7 +49,7 @@ def main():
         w = mr.read(P + n)
         is_q4 = (n.endswith(".weight") and "norm" not in n and "conv1d" not in n
                  and (n.split(".")[0] in ("linear_attn", "self_attn")
-                      or n.startswith("mlp.shared_expert") or ".experts." in n))
+                      or n.startswith("mlp.shared_expert.") or ".experts." in n))
         if a.sim_xbf4 and is_q4:
             from baa_writer_v1 import quant_pack4
             pk = np.frombuffer(quant_pack4(w.reshape(-1, w.shape[-1]).astype(np.float32)), dtype=np.uint8)

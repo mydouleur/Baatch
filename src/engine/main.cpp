@@ -3,6 +3,7 @@
 //   --decode --ids "1,2,3" --n 8 全模型贪心 decode（阶段 3）
 #include "baa.h"
 #include "model.h"
+#include "prefill.h"
 #include <chrono>
 #include <fstream>
 
@@ -33,6 +34,7 @@ int main(int argc, char** argv) { try {
   std::string ids_str;
   std::string probe_dir;
   std::string npu_dir;
+  bool use_prefill = false, npu_experts = false;
   for (int i = 1; i < argc; i++) {
     std::string s = argv[i];
     if (s == "--baa") baa = argv[++i];
@@ -43,11 +45,13 @@ int main(int argc, char** argv) { try {
     else if (s == "--n") n_gen = atoi(argv[++i]);
     else if (s == "--probe") probe_dir = argv[++i];
     else if (s == "--npu-dir") npu_dir = argv[++i];
+    else if (s == "--prefill") use_prefill = true;
+    else if (s == "--npu-xbf4-experts") npu_experts = true;
   }
   Model m;
   m.open(baa);
   NpuBackend npu;
-  if (!npu_dir.empty()) { npu.init(npu_dir); m.npu = &npu; fprintf(stderr, "npu backend on: %s\n", npu_dir.c_str()); }
+  if (!npu_dir.empty()) { npu.init(npu_dir, npu_experts); m.npu = &npu; fprintf(stderr, "npu backend on: %s\n", npu_dir.c_str()); }
   fprintf(stderr, "baa loaded: %zu tensors\n", m.baa.names.size());
 
   if (test_layer >= 0 && test_layer < 1000) {
@@ -57,16 +61,18 @@ int main(int argc, char** argv) { try {
     auto yf_ref = read_f32(vec + "\\y_full.bin");
     int ntok = (int)(xall.size() / Cfg::H);
     GdnState gst;
-    std::vector<float> y1(Cfg::H), y2(Cfg::H);
+    std::vector<float> y1((size_t)ntok * Cfg::H), y2(Cfg::H);
     auto t0 = std::chrono::steady_clock::now();
+    if (use_prefill) gdn_prefill(m, L, gst, xall.data(), ntok, y1.data());
     for (int t = 0; t < ntok; t++) {
-      gdn_decode(m, L, gst, xall.data() + t * Cfg::H, y1.data());
+      if (!use_prefill) gdn_decode(m, L, gst, xall.data() + t * Cfg::H, y1.data() + t * Cfg::H);
       std::vector<float> ref_t(yg_ref.begin() + t * Cfg::H, yg_ref.begin() + (t + 1) * Cfg::H);
-      compare((std::string("gdn_t") + std::to_string(t)).c_str(), y1, ref_t);
+      compare((std::string("gdn_t") + std::to_string(t)).c_str(),
+              std::vector<float>(y1.begin() + t * Cfg::H, y1.begin() + (t + 1) * Cfg::H), ref_t);
     }
-    moe(m, L, y1.data(), y2.data());
+    moe(m, L, y1.data() + (ntok - 1) * Cfg::H, y2.data());
     auto t1 = std::chrono::steady_clock::now();
-    { FILE* f = fopen("y_cpp_gdn.bin", "wb"); fwrite(y1.data(), 4, Cfg::H, f); fclose(f); }
+    { FILE* f = fopen("y_cpp_gdn.bin", "wb"); fwrite(y1.data() + (ntok - 1) * Cfg::H, 4, Cfg::H, f); fclose(f); }
     { FILE* f = fopen("y_cpp_full.bin", "wb"); fwrite(y2.data(), 4, Cfg::H, f); fclose(f); }
     compare("full", y2, yf_ref);
     printf("layer time: %.1f ms (last token)\n", std::chrono::duration<double>(t1 - t0).count() * 1e3);
@@ -117,13 +123,15 @@ int main(int argc, char** argv) { try {
     auto yf_ref = read_f32(vec + "\\y_full.bin");
     int ntok = (int)(xall.size() / Cfg::H);
     AttnState ast;
-    std::vector<float> y1(Cfg::H), y2(Cfg::H);
+    std::vector<float> y1((size_t)ntok * Cfg::H), y2(Cfg::H);
+    if (use_prefill) attn_prefill(m, L, ast, 0, xall.data(), ntok, y1.data());
     for (int t = 0; t < ntok; t++) {
-      attn_decode(m, L, ast, t, xall.data() + t * Cfg::H, y1.data());
+      if (!use_prefill) attn_decode(m, L, ast, t, xall.data() + t * Cfg::H, y1.data() + t * Cfg::H);
       std::vector<float> ref_t(ya_ref.begin() + t * Cfg::H, ya_ref.begin() + (t + 1) * Cfg::H);
-      compare((std::string("attn_t") + std::to_string(t)).c_str(), y1, ref_t);
+      compare((std::string("attn_t") + std::to_string(t)).c_str(),
+              std::vector<float>(y1.begin() + t * Cfg::H, y1.begin() + (t + 1) * Cfg::H), ref_t);
     }
-    moe(m, L, y1.data(), y2.data());
+    moe(m, L, y1.data() + (ntok - 1) * Cfg::H, y2.data());
     compare("full", y2, yf_ref);
     return 0;
   }
@@ -141,38 +149,66 @@ int main(int argc, char** argv) { try {
     std::vector<GdnState> gst(Cfg::NLAYERS);
     std::vector<AttnState> ast(Cfg::NLAYERS);
     fprintf(stderr, "ckpt2: states alloc ok\n");
-    std::vector<float> x(Cfg::H), x2(Cfg::H), logits(Cfg::VOCAB);
-    int next = -1;
-    double t_gen0 = 0; bool first = true;
-    int pos = 0;
-    std::vector<int> out_ids;
-    for (int step = 0; step < (int)ids.size() + n_gen; step++) {
-      int tok = (step < (int)ids.size()) ? ids[step] : next;
-      // embed
-      { if (emb.scheme == 3)
-          dequant_xbf4_row(emb.data + (size_t)tok * (Cfg::H / 256) * 130, Cfg::H, x.data());
-        else if (emb.scheme == 5) {
-          const float* e = emb.f32() + (size_t)tok * Cfg::H;
-          memcpy(x.data(), e, Cfg::H * 4);
-        } else {
-          const uint16_t* e = emb.bf16() + (size_t)tok * Cfg::H;
-          for (int i = 0; i < Cfg::H; i++) x[i] = bf16_to_f32(e[i]);
-        } }
+    std::vector<float> logits(Cfg::VOCAB);
+    auto embed = [&](int tok, float* x) {
+      if (emb.scheme == 3)
+        dequant_xbf4_row(emb.data + (size_t)tok * (Cfg::H / 256) * 130, Cfg::H, x);
+      else if (emb.scheme == 5)
+        memcpy(x, emb.f32() + (size_t)tok * Cfg::H, Cfg::H * 4);
+      else {
+        const uint16_t* e = emb.bf16() + (size_t)tok * Cfg::H;
+        for (int i = 0; i < Cfg::H; i++) x[i] = bf16_to_f32(e[i]);
+      }
+    };
+    std::vector<float> dx(Cfg::H), dx2(Cfg::H);
+    auto decode_one = [&](int tok, int pos, double& ms) {
+      embed(tok, dx.data());
       auto t0 = std::chrono::steady_clock::now();
       for (int l = 0; l < Cfg::NLAYERS; l++) {
-        if (m.is_gdn(l)) gdn_decode(m, l, gst[l], x.data(), x2.data());
-        else attn_decode(m, l, ast[l], pos, x.data(), x2.data());
-        moe(m, l, x2.data(), x.data());
+        if (m.is_gdn(l)) gdn_decode(m, l, gst[l], dx.data(), dx2.data());
+        else attn_decode(m, l, ast[l], pos, dx.data(), dx2.data());
+        moe(m, l, dx2.data(), dx.data());
       }
-      m.nrm(fnorm, x.data(), Cfg::H, x.data(), true);
-      m.mv(lmh, x.data(), logits.data());
+      m.nrm(fnorm, dx.data(), Cfg::H, dx.data(), true);
+      m.mv(lmh, dx.data(), logits.data());
+      ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+      return (int)(std::max_element(logits.begin(), logits.end()) - logits.begin());
+    };
+
+    int next = -1, pos = 0;
+    std::vector<int> out_ids;
+    if (use_prefill && ids.size() > 1) {
+      int T = ids.size();
+      std::vector<float> x((size_t)T * Cfg::H), x2((size_t)T * Cfg::H);
+      for (int t = 0; t < T; t++) embed(ids[t], x.data() + (size_t)t * Cfg::H);
+      auto t0 = std::chrono::steady_clock::now();
+      for (int l = 0; l < Cfg::NLAYERS; l++) {
+        if (m.is_gdn(l)) gdn_prefill(m, l, gst[l], x.data(), T, x2.data());
+        else attn_prefill(m, l, ast[l], 0, x.data(), T, x2.data());
+        for (int t = 0; t < T; t++) moe(m, l, x2.data() + (size_t)t * Cfg::H, x.data() + (size_t)t * Cfg::H);
+      }
+      float* last = x.data() + (size_t)(T - 1) * Cfg::H;
+      m.nrm(fnorm, last, Cfg::H, last, true);
+      m.mv(lmh, last, logits.data());
       next = (int)(std::max_element(logits.begin(), logits.end()) - logits.begin());
-      auto t1 = std::chrono::steady_clock::now();
-      double ms = std::chrono::duration<double>(t1 - t0).count() * 1e3;
-      if (step >= (int)ids.size()) { out_ids.push_back(next); }
-      printf("step %3d tok %6d → %6d  (%.1f ms%s)\n", step, tok, next, ms,
-             step < (int)ids.size() ? " prefill" : "");
-      pos++;
+      double ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+      printf("prefill %d tokens (%.1f ms) -> %d\n", T, ms, next);
+      pos = T;
+      for (int step = 0; step < n_gen; step++) {
+        int tok = next;
+        next = decode_one(tok, pos++, ms);
+        out_ids.push_back(next);
+        printf("step %3d tok %6d → %6d  (%.1f ms)\n", T + step, tok, next, ms);
+      }
+    } else {
+      for (int step = 0; step < (int)ids.size() + n_gen; step++) {
+        int tok = (step < (int)ids.size()) ? ids[step] : next;
+        double ms;
+        next = decode_one(tok, pos++, ms);
+        if (step >= (int)ids.size()) out_ids.push_back(next);
+        printf("step %3d tok %6d → %6d  (%.1f ms%s)\n", step, tok, next, ms,
+               step < (int)ids.size() ? " prefill" : "");
+      }
     }
     printf("OUT_IDS:");
     for (int t : out_ids) printf("%d,", t);

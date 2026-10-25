@@ -30,11 +30,11 @@ static inline uint16_t f32_to_bf16(float f) {
 struct Pool {
   std::thread th;
   std::atomic<uint64_t> go{0}, done{0};
-  std::function<void(int)> fn;  // fn(worker_id)
+  std::function<void(int)> fn;
   bool stop = false;
   Pool() {
     th = std::thread([this] {
-      SetThreadAffinityMask(GetCurrentThread(), 1ull << 2);  // LP2（主线程在 LP0）
+      SetThreadAffinityMask(GetCurrentThread(), 1ull << 2);
       uint64_t seen = 0;
       while (!stop) {
         uint64_t g = go.load(std::memory_order_acquire);
@@ -44,7 +44,6 @@ struct Pool {
     });
   }
   ~Pool() { stop = true; th.join(); }
-  // 主线程跑 id=0，worker 跑 id=1
   void run(std::function<void(int)> f) {
     fn = std::move(f);
     go.fetch_add(1, std::memory_order_release);
@@ -53,7 +52,6 @@ struct Pool {
   }
 };
 
-// ---------------- bf16 GEMV：y[r] = Σ_c W[r,c]·x[c]（W 为 bf16 行主序 [R,C]） ----------------
 static inline void gemv_bf16_rows(const uint16_t* W, int r0, int r1, int C,
                                   const float* x, float* y) {
   for (int r = r0; r < r1; r++) {
@@ -77,7 +75,6 @@ static inline void gemv_bf16(Pool& pool, const uint16_t* W, int R, int C,
   });
 }
 
-// ---------------- XBF3（vnni2）GEMV ----------------
 static const __m512i VN2_IDX = [] {
   alignas(64) uint8_t idx[64];
   for (int j = 0; j < 8; j++)
@@ -93,7 +90,6 @@ static const __m512i VN2_CTRL = [] {
 }();
 static const __m512i VN2_SEVEN = [] { return _mm512_set1_epi8(7); }();
 
-// w: [rows][C/256][98B]；xq: int8 激活（自然序）；sumxq: 每 sb 的 Σxq；sx: 激活 scale
 static void gemv_xbf3_rows(const uint8_t* w, int row0, int nrows, int n_in,
                            const int8_t* xq, const float* sumxq_sb, float sx, float* y) {
   const int sb_per_row = n_in / XBF_SB;
@@ -130,26 +126,46 @@ static inline void gemv_xbf3(Pool& pool, const uint8_t* W, int R, int C,
   });
 }
 
-// 激活量化：xq = round(x/sx)，sx = max|x|/127；sumxq 每 256-sb
 static inline float quant_xq(const float* x, int n, int8_t* xq, float* sumxq) {
-  float amax = 0;
-  for (int i = 0; i < n; i++) amax = std::max(amax, fabsf(x[i]));
+  const __m512i abs_mask = _mm512_set1_epi32(0x7fffffff);
+  __m512 vmax = _mm512_setzero_ps();
+  for (int i = 0; i < n; i += 16) {
+    __m512 v = _mm512_loadu_ps(x + i);
+    vmax = _mm512_max_ps(vmax, _mm512_castsi512_ps(_mm512_and_si512(abs_mask, _mm512_castps_si512(v))));
+  }
+  float amax = _mm512_reduce_max_ps(vmax);
   float sx = std::max(amax / 127.f, 1e-12f);
   __m512 vsx = _mm512_set1_ps(sx);
   for (int sb = 0; sb < n / XBF_SB; sb++) {
+    __m512i vsum = _mm512_setzero_si512();
     for (int i = 0; i < 256; i += 16) {
       __m512 v = _mm512_div_ps(_mm512_loadu_ps(x + sb * 256 + i), vsx);
-      __m128i q8 = _mm512_cvtsepi32_epi8(_mm512_cvtps_epi32(v));  // cvtps 已含最近舍入
-      _mm_storeu_si128((__m128i*)(xq + sb * 256 + i), q8);
+      __m512i q = _mm512_cvtps_epi32(v);
+      vsum = _mm512_add_epi32(vsum, q);
+      _mm_storeu_si128((__m128i*)(xq + sb * 256 + i), _mm512_cvtsepi32_epi8(q));
     }
-    int sum = 0;
-    for (int i = 0; i < 256; i++) sum += xq[sb * 256 + i];
-    sumxq[sb] = (float)sum;
+    sumxq[sb] = (float)_mm512_reduce_add_epi32(vsum);
   }
   return sx;
 }
 
-// ---------------- f32 GEMV（路由器/小权重不压） ----------------
+static inline float quant_xq16(const float* x, int n, int16_t* xq) {
+  const __m512i abs_mask = _mm512_set1_epi32(0x7fffffff);
+  __m512 vmax = _mm512_setzero_ps();
+  for (int i = 0; i < n; i += 16) {
+    __m512 v = _mm512_loadu_ps(x + i);
+    vmax = _mm512_max_ps(vmax, _mm512_castsi512_ps(_mm512_and_si512(abs_mask, _mm512_castps_si512(v))));
+  }
+  float sx = std::max(_mm512_reduce_max_ps(vmax) / 127.f, 1e-12f);
+  __m512 vsx = _mm512_set1_ps(sx);
+  for (int i = 0; i < n; i += 16) {
+    __m512 v = _mm512_div_ps(_mm512_loadu_ps(x + i), vsx);
+    __m512i q = _mm512_cvtps_epi32(v);
+    _mm256_storeu_si256((__m256i*)(xq + i), _mm512_cvtsepi32_epi16(q));
+  }
+  return sx;
+}
+
 static inline void gemv_f32_rows(const float* W, int r0, int r1, int C,
                                  const float* x, float* y) {
   for (int r = r0; r < r1; r++) {
@@ -171,9 +187,6 @@ static inline void gemv_f32(Pool& pool, const float* W, int R, int C,
   });
 }
 
-// ---------------- 小 ops（fp32） ----------------
-// qwen3_5_moe 两种 RMSNorm：plus1=true → ×(1+w)（input/post/qk/final norm，零中心权重）；
-// plus1=false → ×w（GDN 输出门控 norm，ones 初始化权重）
 static inline void rmsnorm(const float* x, const uint16_t* w_bf, int n, float* y,
                            float eps = 1e-6f, bool plus1 = false) {
   float ss = 0;
