@@ -41,6 +41,7 @@ def main():
     ap.add_argument("--m", type=int, default=1)
     ap.add_argument("--pattern", default=None)
     ap.add_argument("--independent-rows", action="store_true")
+    ap.add_argument("--activation", help="reuse packed A from another generated dataset")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     K = a.size
@@ -165,6 +166,11 @@ def main():
             ap.error(f"arows requires {M} comma-separated values")
         for m, value in enumerate(values):
             A[m, :] = value
+    if a.activation:
+        packed = np.fromfile(a.activation, dtype=np.int16)
+        if packed.size != M * K:
+            ap.error(f"--activation has {packed.size} values, expected {M * K}")
+        A = packed.reshape(K // 128, M, 128).transpose(1, 0, 2).reshape(M, K).copy()
     C = np.zeros((M, N), dtype=np.float64)
     for m in range(M):
         for t in range(K // GS):
