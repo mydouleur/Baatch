@@ -5,18 +5,18 @@
 - XBF2/XBF4 routed experts 默认走 CPU；XBF4 的 NPU 路径仅留实验对照。
 - 共享专家与 routed experts 默认走 CPU；attention/GDN 大投影、MTP 头、lm_head → NPU。
 - GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；out_proj 在 decode 默认走 AVX-512 CPU，在 prefill 默认走 NPU。
-- GDN qkv+z、attention q+k+v 使用 fused projections；最新默认 decode 暖态约 0.16–0.19s/token，65-token prefill 6.17s（10.54 tok/s）、5283 次调用 0 flake。
+- GDN qkv+z、attention q+k+v 默认共同复用 N12288，decode 约 2 次形状切换/token；`NPU_WIDE_ATTN=0` 回退。最新默认 decode 暖态约 0.096–0.120s/token，65-token prefill 5.92s（10.98 tok/s）、5283 次调用 0 flake。
 
 ## 已完成
 
 - M3'-a：全模型 CPU decode、XBF24 容器、专家粒度 scheme 分发。
 - M3'-b：NPU W4A8 密集路径、异步 submit/wait、超时熔断、hw_context 生命周期管理。
 - M3 功能验收：三次独立 32-token 输出一致、0 flake。
-- M=1 dense prefill：64-token 分块；MoE 按专家多 token GEMM 已接入，T=1/2/8/65 对拍通过，65-token prefill 6.17s（10.54 tok/s），输出一致。
+- M=1 dense prefill：64-token 分块；MoE 按专家多 token GEMM 已接入，T=1/2/8/65 对拍通过，65-token prefill 5.92s（10.98 tok/s），输出一致。
 - CPU 激活量化、整数求和、偶奇/模4拆分已向量化。
 - XBF4 routed experts NPU：40 层 80 个 GEMV 全部 PASS，最大 rel_l2=0.00546；独立生成及 prefill/decode 一致，0 flake，XBF2 保持 CPU。
 - MoE 单层 current/planned 输出一致，planned 暖态无显著收益。E4×2 batch 数值通过但更慢（layer0 约 12.0ms vs current 约 9.1ms）。列并行 p4 每列持完整专家，数值通过、约 10.8ms，优于串行 batch 但仍慢于 current；均不进入全模型。
-- scheduled MoE 与预平铺 XBF4 行权重缓存已接默认；shared 约 0.9→0.07ms/层，layer0/layer10 暖态约 0.4–0.6ms。默认 decode 约 160–190ms/token（5.3–6.2 tok/s），NPU 0 flake；`MOE_SCHEDULED=0` 可回退。routed 4/8 线程无稳定收益，保持两线程。
+- scheduled MoE 与预平铺 XBF4 行权重缓存已接默认；shared 约 0.9→0.07ms/层，layer0/layer10 暖态约 0.4–0.6ms。默认 decode 约 96–120ms/token（8.3–10.4 tok/s），NPU 0 flake；`MOE_SCHEDULED=0` 可回退。routed 4/8 线程无稳定收益，保持两线程。
 
 ## 当前执行顺序
 

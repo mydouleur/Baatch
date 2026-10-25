@@ -51,6 +51,10 @@ static inline bool env_flag(const char* name) {
   const char* value = getenv(name);
   return value && *value && *value != '0';
 }
+static inline bool env_flag_default(const char* name) {
+  const char* value = getenv(name);
+  return !value || *value != '0';
+}
 
 struct Model {
   Baa baa;
@@ -376,7 +380,8 @@ static void attn_decode(Model& m, int l, AttnState& st, int pos, const float* xi
   float* fused_outputs[] = {qg.data(), kk.data(), vv.data()};
   NpuBackend::Job qjob;
   if (!env_flag("CPU_KV") && m.npu && m.npu->ok &&
-      m.npu->gemv_fused(fused_weights, 3, xn.data(), fused_outputs)) {
+      m.npu->gemv_fused(fused_weights, 3, xn.data(), fused_outputs,
+                        env_flag_default("NPU_WIDE_ATTN") ? 12288 : 0)) {
   } else if (kv_cpu && m.npu_submit(qw, xn.data(), qg.data(), qjob)) {
     run_kv();
     m.npu_finish(qw, xn.data(), qg.data(), qjob, "q_proj");

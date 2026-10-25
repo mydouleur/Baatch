@@ -122,7 +122,8 @@ static void attn_prefill_chunk(Model& m, int l, AttnState& st, int pos0,
     m.nrm(m.T(LN(l, "input_layernorm.weight")), xin + t * H, H, xn.data() + t * H, true);
     const BaaTensor* weights[] = {&qw, &kw, &vw};
     float* outputs[] = {qg.data() + t * QPROJ, kk.data() + t * KVH * AHD, vv.data() + t * KVH * AHD};
-    if (!m.npu || !m.npu->ok || !m.npu->gemv_fused(weights, 3, xn.data() + t * H, outputs)) {
+    if (!m.npu || !m.npu->ok || !m.npu->gemv_fused(weights, 3, xn.data() + t * H, outputs,
+                                                    env_flag_default("NPU_WIDE_ATTN") ? 12288 : 0)) {
       m.mv(qw, xn.data() + t * H, qg.data() + t * QPROJ);
       m.mv(kw, xn.data() + t * H, kk.data() + t * KVH * AHD);
       m.mv(vw, xn.data() + t * H, vv.data() + t * KVH * AHD);

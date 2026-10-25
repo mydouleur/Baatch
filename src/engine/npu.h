@@ -196,14 +196,13 @@ struct NpuBackend {
     return r.first->second.bo;
   }
 
-  xrt::bo& bo_fused(Shape& s, const BaaTensor* const* tensors,
+  xrt::bo& bo_fused(Shape& s, const BaaTensor* const* tensors, int tensor_count,
                     const std::vector<int>& physical_ns) {
     std::vector<const void*> key;
     size_t bytes = 0;
-    for (int i = 0; i < (int)physical_ns.size(); i++) {
-      key.push_back(tensors[i]->data);
-      bytes += (size_t)(tensors[i]->shape[1] / 128) * (physical_ns[i] / 64) * 4352;
-    }
+    int K = (int)tensors[0]->shape[1];
+    for (int i = 0; i < tensor_count; i++) key.push_back(tensors[i]->data);
+    for (int n : physical_ns) bytes += (size_t)(K / 128) * (n / 64) * 4352;
     auto it = s.fused_cache.find(key);
     if (it != s.fused_cache.end()) {
       bo_hits++;
@@ -219,14 +218,13 @@ struct NpuBackend {
     size_t dst = 0;
     for (int cm = 0; cm < 8; cm++) {
       for (int i = 0; i < (int)physical_ns.size(); i++) {
-        const BaaTensor& t = *tensors[i];
-        int N = (int)t.shape[0], K = (int)t.shape[1];
-        int src_n = (N + 2047) & ~2047;
+        int N = i < tensor_count ? (int)tensors[i]->shape[0] : 0;
+        int src_n = i < tensor_count ? (N + 2047) & ~2047 : 0;
         for (int lt = cm; lt < physical_ns[i] / 64; lt += 8) {
           for (int ltr = 0; ltr < K / 128; ltr++) {
             if (lt * 64 < N) {
               size_t src = ((size_t)cm * (src_n / 512) + lt / 8) * (K / 128) + ltr;
-              memcpy(out + dst, t.data + src * 4352, 4352);
+              memcpy(out + dst, tensors[i]->data + src * 4352, 4352);
             } else {
               memset(out + dst, 0, 4352);
             }
@@ -309,7 +307,8 @@ struct NpuBackend {
     return wait(j);
   }
 
-  bool gemv_fused(const BaaTensor* const* tensors, int count, const float* x, float* const* ys) {
+  bool gemv_fused(const BaaTensor* const* tensors, int count, const float* x, float* const* ys,
+                  int min_physical_N = 0) {
     if (busy || count < 2) return false;
     auto t0 = std::chrono::steady_clock::now();
     int K = (int)tensors[0]->shape[1], physical_N = 0;
@@ -322,12 +321,19 @@ struct NpuBackend {
       physical_N += physical_ns[i];
       weight_bytes += (size_t)(K / 128) * (physical_ns[i] / 64) * 4352;
     }
+    min_physical_N = (min_physical_N + 2047) & ~2047;
+    if (physical_N < min_physical_N) {
+      int padding = min_physical_N - physical_N;
+      physical_ns.push_back(padding);
+      physical_N += padding;
+      weight_bytes += (size_t)(K / 128) * (padding / 64) * 4352;
+    }
     Shape& s = shape_for(K, physical_N);
     if (last_shape && last_shape != &s) { shape_switches++; s.switches++; }
     last_shape = &s;
     physical_weight_bytes += weight_bytes;
     s.weight_bytes += weight_bytes;
-    xrt::bo& bb = bo_fused(s, tensors, physical_ns);
+    xrt::bo& bb = bo_fused(s, tensors, count, physical_ns);
     aq.resize(K);
     float sx = quant_xq16(x, K, aq.data());
     memcpy(s.ba.map(), aq.data(), K * 2);
