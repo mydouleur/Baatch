@@ -13,7 +13,10 @@ static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, i
   const BaaTensor* weights[] = {&qw, &zw};
   for (int t = 0; t < T; t++) {
     float* outputs[] = {qkv.data() + t * QKV_DIM, z.data() + t * VAL_DIM};
-    if (!m.npu || !m.npu->ok || !m.npu->gemv_fused(weights, 2, xn.data() + t * H, outputs)) {
+    if (!env_flag("NPU_PROJ")) {
+      cpu_mv_pretiled_fast(qw, xn.data() + t * H, qkv.data() + t * QKV_DIM, &m.pool);
+      cpu_mv_pretiled_fast(zw, xn.data() + t * H, z.data() + t * VAL_DIM, &m.pool);
+    } else if (!m.npu || !m.npu->ok || !m.npu->gemv_fused(weights, 2, xn.data() + t * H, outputs)) {
       m.mv(qw, xn.data() + t * H, qkv.data() + t * QKV_DIM);
       m.mv(zw, xn.data() + t * H, z.data() + t * VAL_DIM);
     }
@@ -131,7 +134,11 @@ static void attn_prefill_chunk(Model& m, int l, AttnState& st, int pos0,
   for (int t = 0; t < T; t++) {
     float* outputs[] = {qg.data() + t * QPROJ, kk.data() + t * KVH * AHD, vv.data() + t * KVH * AHD};
     int wide = env_flag_default("NPU_WIDE_ATTN") ? 12288 : 0;
-    if (!m.npu || !m.npu->ok || !m.npu->gemv_fused(weights, 3, xn.data() + t * H, outputs, wide)) {
+    if (!env_flag("NPU_PROJ")) {
+      cpu_mv_pretiled_fast(qw, xn.data() + t * H, qg.data() + t * QPROJ, &m.pool);
+      cpu_mv_pretiled_fast(kw, xn.data() + t * H, kk.data() + t * KVH * AHD, &m.pool);
+      cpu_mv_pretiled_fast(vw, xn.data() + t * H, vv.data() + t * KVH * AHD, &m.pool);
+    } else if (!m.npu || !m.npu->ok || !m.npu->gemv_fused(weights, 3, xn.data() + t * H, outputs, wide)) {
       m.mv(qw, xn.data() + t * H, qg.data() + t * QPROJ);
       m.mv(kw, xn.data() + t * H, kk.data() + t * KVH * AHD);
       m.mv(vw, xn.data() + t * H, vv.data() + t * KVH * AHD);

@@ -181,11 +181,14 @@ int main(int argc, char** argv) { try {
         else moe(m, l, dx2.data(), dx.data());
         prof_add(g_prof.moe[l], mt);
       }
+      auto lh = prof_now();
       m.nrm(fnorm, dx.data(), Cfg::H, dx.data(), true);
       if (env_flag_default("CPU_LM_HEAD")) cpu_mv_pretiled_fast(lmh, dx.data(), logits.data(), &m.pool);
       else m.mv(lmh, dx.data(), logits.data());
+      int result = (int)(std::max_element(logits.begin(), logits.end()) - logits.begin());
+      prof_add(g_prof.lm_head, lh);
       ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
-      return (int)(std::max_element(logits.begin(), logits.end()) - logits.begin());
+      return result;
     };
 
     int next = -1, pos = 0;
@@ -256,8 +259,8 @@ int main(int argc, char** argv) { try {
         kv_bytes += (ast[l].k.size() + ast[l].v.size()) * sizeof(float);
         gdn_bytes += (gst[l].ssm.size() + gst[l].conv.size()) * sizeof(float);
       }
-      printf("[prof] totals proj_ms=%.3f state_ms=%.3f out_ms=%.3f moe_ms=%.3f "
-             "kv_MB=%.3f gdn_MB=%.3f\n", tp, ts, to, tm,
+      printf("[prof] totals proj_ms=%.3f state_ms=%.3f out_ms=%.3f moe_ms=%.3f lm_head_ms=%.3f "
+             "kv_MB=%.3f gdn_MB=%.3f\n", tp, ts, to, tm, g_prof.lm_head,
              kv_bytes / 1e6, gdn_bytes / 1e6);
       npu.print_stats();
     }

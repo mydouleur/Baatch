@@ -3,8 +3,8 @@
 ## 当前分工（2026-10-25 实测修订）
 
 - XBF2/XBF4 routed experts 默认走 CPU；`--npu-xbf4-experts` 仅作实验对照。
-- 共享专家与 routed experts 默认走 CPU；attention/GDN 大投影、MTP 头 → NPU；lm_head 在 decode 默认走两核 CPU，在 prefill 末尾走 NPU。
-- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；out_proj 在 decode/prefill 均默认走 AVX-512 CPU，`NPU_OUT_PROJ=1` 保留 prefill NPU 对照。64-token 两轮 CPU 3871/3958ms、NPU 4393/4653ms。
+- 共享专家与 routed experts 默认走 CPU；attention/GDN 大投影 decode 与 MTP 头走 NPU；lm_head 在 decode 默认走两核 CPU，在 prefill 末尾走 NPU。
+- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；prefill 大投影与 out_proj 也默认两核 CPU，`NPU_PROJ=1`/`NPU_OUT_PROJ=1` 保留对照。65-token CPU projection 3321ms、NPU 3824ms；第 0 层 projection rel_l2=0.00438。
 - GDN qkv+z、attention q+k+v 默认共同复用 N12288；decode 暖态约 75–100ms/token，65-token prefill 约 6–6.3s。
 
 规划结构（见 docs/M2_ARCH.md §3）：

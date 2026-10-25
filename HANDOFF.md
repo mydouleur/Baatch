@@ -10,7 +10,7 @@
 
 - **XBF2/XBF4 routed experts 默认走 CPU**；XBF4 的 NPU 路径仅留实验对照。
 - **共享专家、routed experts、GDN 状态递推、embedding、router/top-k、采样、fallback 默认走 CPU**。
-- **attention/GDN 大投影、MTP 头 → NPU**；lm_head 在 decode 默认走两核 AVX-512 CPU，在 prefill 末尾走 NPU；out_proj 在 decode/prefill 均默认走 AVX-512 CPU，`NPU_OUT_PROJ=1` 保留 prefill NPU 对照，其他部件按实测总成本分流。
+- **attention/GDN 大投影 decode 与 MTP 头 → NPU，prefill 大投影与 out_proj 默认两核 AVX-512 CPU**；lm_head 在 decode 默认 CPU、prefill 末尾走 NPU。`NPU_PROJ=1`、`NPU_OUT_PROJ=1` 保留 prefill NPU 对照，其他部件按实测总成本分流。
 - GDN qkv+z、attention q+k+v 使用 fused projections；不得仅按“专家/非专家”机械分流。
 
 ## 目录地图
