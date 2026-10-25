@@ -45,12 +45,12 @@ static void gemv_xbf4_128_rows(const uint8_t* w, int nrows, int n_in,
                                const int8_t* xe, const int8_t* xo,
                                const int* sumxq, float sx, float* y) {
   const int blocks = n_in / 128;
-  const size_t row_bytes = (size_t)blocks * 130;
+  const size_t row_bytes = (size_t)blocks * 66;
   for (int r = 0; r < nrows; r++) {
     const uint8_t* row = w + (size_t)r * row_bytes;
     float yr = 0.f;
     for (int b = 0; b < blocks; b++) {
-      const uint8_t* wb = row + b * 130;
+      const uint8_t* wb = row + b * 66;
       __m512i z = _mm512_loadu_si512(wb + 2);
       __m512i lo = _mm512_and_si512(z, XBF4_LO);
       __m512i hi = _mm512_and_si512(_mm512_srli_epi16(z, 4), XBF4_LO);

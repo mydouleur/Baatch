@@ -29,7 +29,7 @@ namespace Cfg {
 #include "profile.h"
 
 static void cpu_mv_pretiled(const BaaTensor& t, const float* x, float* y);
-static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y);
+static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y, Pool* pool = nullptr);
 
 struct GdnState {
   std::vector<float> conv;   // (CONV_K-1) × QKV_DIM
@@ -185,12 +185,12 @@ static void cpu_mv_pretiled(const BaaTensor& t, const float* x, float* y) {
       }
 }
 
-static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y) {
+static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y, Pool* pool) {
   int N = (int)t.shape[0], K = (int)t.shape[1];
   int physical_K = (t.flags & 2) ? 4096 : (t.flags & 4) ? 2048 : K;
   int physical_N = (t.flags & 2) || (t.flags & 8) ? 8192 : (t.flags & 4) ? 2048 : (N + 2047) & ~2047;
   if (t.cpu_rows.empty()) {
-    t.cpu_rows.resize((size_t)N * (K / 128) * 130);
+    t.cpu_rows.resize((size_t)N * (K / 128) * 66);
     int nlt_col = physical_N / 64, idx = 0;
     for (int cm = 0; cm < 8; cm++) {
       for (int lt_col = cm; lt_col < nlt_col; lt_col += 8) {
@@ -211,7 +211,7 @@ static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y) {
             }
           }
           for (int n = 0; n < 64 && lt_col * 64 + n < N; n++) {
-            uint8_t* row = t.cpu_rows.data() + ((size_t)(lt_col * 64 + n) * (K / 128) + ltr) * 130;
+            uint8_t* row = t.cpu_rows.data() + ((size_t)(lt_col * 64 + n) * (K / 128) + ltr) * 66;
             row[0] = sc[n] & 0xFF;
             row[1] = sc[n] >> 8;
             for (int k = 0; k < 128; k += 2)
@@ -228,7 +228,16 @@ static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y) {
   std::vector<int> tile_sums(K / 128);
   for (int b = 0; b < K / 128; b++)
     for (int i = 0; i < 128; i++) tile_sums[b] += q[b * 128 + i];
-  gemv_xbf4_128_rows(t.cpu_rows.data(), N, K, xe.data(), xo.data(), tile_sums.data(), sx, y);
+  if (pool) {
+    size_t row_bytes = (size_t)(K / 128) * 66;
+    pool->run_all([&](int id) {
+      int begin = N * id / pool->workers, end = N * (id + 1) / pool->workers;
+      gemv_xbf4_128_rows(t.cpu_rows.data() + (size_t)begin * row_bytes, end - begin, K,
+                         xe.data(), xo.data(), tile_sums.data(), sx, y + begin);
+    });
+  } else {
+    gemv_xbf4_128_rows(t.cpu_rows.data(), N, K, xe.data(), xo.data(), tile_sums.data(), sx, y);
+  }
 }
 
 // ---------------- GDN decode（linear_attn，照 qwen35moe/delta-net decode 数学） ----------------

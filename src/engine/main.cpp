@@ -182,7 +182,8 @@ int main(int argc, char** argv) { try {
         prof_add(g_prof.moe[l], mt);
       }
       m.nrm(fnorm, dx.data(), Cfg::H, dx.data(), true);
-      m.mv(lmh, dx.data(), logits.data());
+      if (env_flag_default("CPU_LM_HEAD")) cpu_mv_pretiled_fast(lmh, dx.data(), logits.data(), &m.pool);
+      else m.mv(lmh, dx.data(), logits.data());
       ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
       return (int)(std::max_element(logits.begin(), logits.end()) - logits.begin());
     };

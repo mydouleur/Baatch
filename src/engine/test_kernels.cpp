@@ -80,7 +80,7 @@ static int run_case(int R, int C, std::mt19937& rng) {
     }
   ref_gemv<OFF>(dat.data(), sc.data(), R, C, xq.data(), sx, sumxq.data(), yref.data(), VPB);
   if constexpr (BITS == 4) {
-    std::vector<uint8_t> w128((size_t)R * (C / 128) * 130);
+    std::vector<uint8_t> w128((size_t)R * (C / 128) * 66);
     std::vector<int> sums128(C / 128);
     std::vector<int8_t> xe(C / 2), xo(C / 2);
     std::vector<float> y128(R);
@@ -88,7 +88,7 @@ static int run_case(int R, int C, std::mt19937& rng) {
       for (int i = 0; i < 128; i++) sums128[b] += xq[b * 128 + i];
       for (int r = 0; r < R; r++) {
         const uint8_t* src = w.data() + (size_t)r * wrow + (b / 2) * 130;
-        uint8_t* dst = w128.data() + ((size_t)r * (C / 128) + b) * 130;
+        uint8_t* dst = w128.data() + ((size_t)r * (C / 128) + b) * 66;
         memcpy(dst, src, 2);
         memcpy(dst + 2, src + 2 + (b % 2) * 64, 64);
       }

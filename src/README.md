@@ -3,9 +3,9 @@
 ## 当前分工（2026-10-25 实测修订）
 
 - XBF2/XBF4 routed experts 默认走 CPU；`--npu-xbf4-experts` 仅作实验对照。
-- 共享专家与 routed experts 默认走 CPU；attention/GDN 大投影、MTP 头、lm_head → NPU。
+- 共享专家与 routed experts 默认走 CPU；attention/GDN 大投影、MTP 头 → NPU；lm_head 在 decode 默认走两核 CPU，在 prefill 末尾走 NPU。
 - GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；out_proj 在 decode 默认走 AVX-512 CPU，在 prefill 默认走 NPU。
-- GDN qkv+z、attention q+k+v 使用 fused projections，暖态约 0.30–0.35s/token；65-token prefill 9.51s、5283 次调用 0 flake。
+- GDN qkv+z、attention q+k+v 默认共同复用 N12288；decode 暖态约 75–100ms/token，65-token prefill 约 6–6.3s。
 
 规划结构（见 docs/M2_ARCH.md §3）：
 
@@ -129,10 +129,10 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   fused `_m` 仍有 wn 车道错误，稳定版本逐行调用 M1 kernel。
 - M=1 K4096/N2048 已删除无效 ping-pong 并接默认资产：暖态 avg 0.332→0.221ms；
   65-token prefill 49.63→46.21s，输出一致、38193 次调用 0 flake。
-- MoE scheduled 已设默认，`MOE_SCHEDULED=0` 回退；预平铺 XBF4 首次转换为 128 通道
-  行权重并缓存，shared/out_proj 不再每 token 解包。shared 约 0.9→0.07ms/层，layer0/layer10
-  暖态约 0.4–0.6ms；attention 默认补零复用 N12288，decode 约 96–120ms/token（8.3–10.4 tok/s），65-token prefill
-  5.92s（10.98 tok/s），NPU 0 flake。`bench_moe` 另有 direct/scheduled、固定/随机 top8
+- MoE scheduled 已设默认，`MOE_SCHEDULED=0` 回退；预平铺 XBF4 首次转换为 128 通道、
+  每块 66B 的行权重并缓存。decode lm_head 默认两核 CPU，`CPU_LM_HEAD=0` 回退；
+  attention 默认补零复用 N12288，decode 约 75–100ms/token（10–13.3 tok/s），65-token prefill
+  约 6–6.3s，NPU 0 flake。`bench_moe` 另有 direct/scheduled、固定/随机 top8
   与 GEMV/同步/量化分项；4/8 routed 线程无稳定收益，保持两线程。
 - CPU 激活量化、整数求和、偶奇/模4拆分已 AVX-512 化，单测与层对拍 PASS。
 - `--npu-layout fast` 过渡实验已停止，不再缩小既定 NPU 分工。balanced 也没有实质收益。

@@ -10,7 +10,7 @@
 
 - **XBF2/XBF4 routed experts 默认走 CPU**；XBF4 的 NPU 路径仅留实验对照。
 - **共享专家、routed experts、GDN 状态递推、embedding、router/top-k、采样、fallback 默认走 CPU**。
-- **attention/GDN 大投影、MTP 头、lm_head → NPU**；out_proj 在 decode 默认走 AVX-512 CPU，在 prefill 默认走 NPU，其他部件按实测总成本分流。
+- **attention/GDN 大投影、MTP 头 → NPU**；lm_head 在 decode 默认走两核 AVX-512 CPU，在 prefill 末尾走 NPU；out_proj 在 decode 默认走 AVX-512 CPU，在 prefill 默认走 NPU，其他部件按实测总成本分流。
 - GDN qkv+z、attention q+k+v 使用 fused projections；不得仅按“专家/非专家”机械分流。
 
 ## 目录地图
@@ -32,7 +32,7 @@
 - **M3 功能闭环**：NPU 密集 decode + CPU routed experts；三次独立 32-token 输出一致，累计 24849 次调用、0 flake。
 - **2026-10-25 分流实测**：GDN 递推仅约 9ms/token，暂缓双核；XBF4 gate_up+down 都回 CPU 后约 0.85–0.93s/token，shared down 与 CPU routed experts 重叠后约 0.74–0.76s/token。K2048/N2048 的无效 ping-pong 已接入默认资产。
 - **Fused projections 已接默认路径**：GDN qkv+z 使用 K2048/N12288，attention q+k+v 也补零复用 N12288（k/v 各 1024），decode 形状切换从约 21 次/token 降至约 2 次；`NPU_WIDE_ATTN=0` 可回退 N10240。共享 gate/up/down 默认 CPU，out_proj decode 默认 AVX-512 CPU、prefill 默认 NPU。
-- **MoE scheduled 与 CPU 行权重缓存已设默认**：`moe_scheduler.h` 复用 LayerPlan、量化与 slot workspace，routed worker 与主线程 shared 重叠；`MOE_SCHEDULED=0` 可回退原路径。预平铺 XBF4 首次使用时转换为 128 通道行布局并缓存，之后直接走 AVX-512 GEMV，不再每 token 解包。shared 从约 0.9ms 降至 0.07ms/层，layer0/layer10 暖态约 0.4–0.6ms。默认 8-token decode 暖态约 96–120ms/token（8.3–10.4 tok/s），输出一致且 NPU 0 flake。新 shared W4A8 路径会改变 greedy 序列，量化质量仍待后续验收。
+- **MoE scheduled、66B 行权重缓存与 CPU lm_head 已设默认**：`moe_scheduler.h` 复用 LayerPlan、量化与 slot workspace；`MOE_SCHEDULED=0` 可回退原路径。预平铺 XBF4 首次使用时转换为 128 通道、每块 66B 的行布局并缓存，不再每 token 解包或按 130B 浪费读取。decode lm_head 默认两核 CPU，`CPU_LM_HEAD=0` 回退 NPU。默认 decode 暖态约 75–100ms/token（10–13.3 tok/s），输出一致且 NPU 0 flake。四行 GEMV、4/8 核 out_proj、线程亲和性调整及专家匿名 RAM 复制均无稳定端到端收益，未接入；量化质量仍待后续验收。
 - **prefill MoE 按专家多 token batch 已接默认**：`moe_prefill.h` 按 router 分组执行 gather→XBF4/XBF2 多 token GEMM→scatter，同一权重读取服务多个 token；dense 投影仍用稳定 M=1。T=1/2/8/65 的 layer0/layer10 对拍通过，65-token prefill 5.92s（10.98 tok/s），输出 9707 不变，5283 次 NPU 调用 0 flake。
 - **uniform 是过渡实验**：约 171–220ms/token，物理流量 4.73GB/token；dense 为 1.185GB/token，uniform 不是最终低功耗格式。
 - **XBF4 routed experts NPU 数值路径已验收**：按需 host 转 tile + 512MB 缓存；40 层 80 个 GEMV 全部 PASS，最大 rel_l2=0.00546。两次独立 8-token 输出一致，11420 次调用、0 flake；prefill/decode 一致。量化噪声可改变近并列路由及后续 greedy token，不要求与 CPU 逐 token 相同，质量门留待后续。

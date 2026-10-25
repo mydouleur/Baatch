@@ -26,30 +26,49 @@ static inline uint16_t f32_to_bf16(float f) {
   return (uint16_t)((u + 0x7FFF + ((u >> 16) & 1)) >> 16);
 }
 
-// ---------------- 极简 2 线程池（绑大核 LP0/LP2） ----------------
+// ---------------- 极简线程池（普通 GEMV 仍只用 LP0/LP2） ----------------
 struct Pool {
-  std::thread th;
-  std::atomic<uint64_t> go{0}, done{0};
+  std::vector<std::thread> threads;
+  std::atomic<uint64_t> go{0};
+  std::atomic<int> active{2}, finished{0};
   std::function<void(int)> fn;
   std::atomic<bool> stop{false};
+  int workers;
   Pool() {
-    th = std::thread([this] {
-      SetThreadAffinityMask(GetCurrentThread(), 1ull << 2);
+    const char* env = getenv("CPU_WIDE_THREADS");
+    workers = env ? atoi(env) : 2;
+    workers = std::max(1, std::min(8, workers));
+    static const DWORD_PTR affinity[] = {1ull << 0, 1ull << 2, 1ull << 4, 1ull << 6,
+                                         1ull << 8, 1ull << 10, 1ull << 12, 1ull << 14};
+    for (int id = 1; id < std::max(workers, 2); id++) threads.emplace_back([this, id] {
+      SetThreadAffinityMask(GetCurrentThread(), affinity[id]);
       uint64_t seen = 0;
       while (!stop.load(std::memory_order_relaxed)) {
         uint64_t g = go.load(std::memory_order_acquire);
-        if (g != seen) { seen = g; fn(1); done.store(seen, std::memory_order_release); }
-        else _mm_pause();
+        if (g != seen) {
+          seen = g;
+          if (id < active.load(std::memory_order_relaxed)) {
+            fn(id);
+            finished.fetch_add(1, std::memory_order_release);
+          }
+        } else _mm_pause();
       }
     });
   }
-  ~Pool() { stop.store(true, std::memory_order_relaxed); th.join(); }
-  void run(std::function<void(int)> f) {
+  ~Pool() {
+    stop.store(true, std::memory_order_relaxed);
+    for (auto& thread : threads) thread.join();
+  }
+  void dispatch(std::function<void(int)> f, int count) {
     fn = std::move(f);
+    active.store(count, std::memory_order_relaxed);
+    finished.store(0, std::memory_order_relaxed);
     go.fetch_add(1, std::memory_order_release);
     fn(0);
-    while (done.load(std::memory_order_acquire) != go.load()) _mm_pause();
+    while (finished.load(std::memory_order_acquire) != count - 1) _mm_pause();
   }
+  void run(std::function<void(int)> f) { dispatch(std::move(f), 2); }
+  void run_all(std::function<void(int)> f) { dispatch(std::move(f), workers); }
 };
 
 static inline void gemv_bf16_rows(const uint16_t* W, int r0, int r1, int C,
