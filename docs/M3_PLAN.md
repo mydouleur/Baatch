@@ -4,7 +4,7 @@
 
 - XBF2/XBF4 routed experts 默认走 CPU；XBF4 的 NPU 路径仅留实验对照。
 - 共享专家与 routed experts 默认走 CPU；attention/GDN 大投影、MTP 头 → NPU；lm_head 在 decode 默认走两核 CPU，在 prefill 末尾走 NPU。
-- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；out_proj 在 decode 默认走 AVX-512 CPU，在 prefill 默认走 NPU。
+- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；out_proj 在 decode/prefill 均默认走 AVX-512 CPU，`NPU_OUT_PROJ=1` 保留 prefill NPU 对照。64-token 两轮 CPU 3871/3958ms、NPU 4393/4653ms。
 - GDN qkv+z、attention q+k+v 默认共同复用 N12288；`NPU_WIDE_ATTN=0` 回退，`CPU_LM_HEAD=0` 回退 NPU lm_head。最新默认 decode 暖态约 0.075–0.100s/token，65-token prefill 约 6–6.3s。
 
 ## 已完成
@@ -25,7 +25,7 @@
 2. **NPU 执行图与无效带宽优化**
    N12288 复用已消除 decode 主投影切换，GDN 更新/输出融合少读 63MB/token。当前约 1.78GB/token，CPU4+NPU 实测聚合约 77GB/s，18ms 需要约 99GB/s 且受逐层依赖限制。下一步验证常驻 context、weight-ahead/activation-later；不得回退 insts 热换或多 context。
 3. **prefill M>1 与性能功耗基线**
-   K2048 主 fused Shape 的 M2 已闭合且有 kernel 收益；K4096/N2048 仍确定性 ERT timeout。`NPU_M2=1` 默认关闭，完整 64-token chunk 约快 4.7%，65-token 无净收益。继续按逐层成本优化 MoE/GEMM 与 decode，并建立功耗对照。
+   K2048 主 fused Shape 的 M2 已闭合且有 kernel 收益；K4096/N2048 仍确定性 ERT timeout。`NPU_M2=1` 默认关闭，配 CPU out 的 64-token chunk 约快 11.1%，65-token 无净收益。继续按逐层成本优化 MoE/GEMM 与 decode，并建立功耗对照。
 4. **MTP**
    实现 draft/verify/accept 与状态回滚，实测接受率和净加速。
 5. **量化质量**

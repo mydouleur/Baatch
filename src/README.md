@@ -4,7 +4,7 @@
 
 - XBF2/XBF4 routed experts 默认走 CPU；`--npu-xbf4-experts` 仅作实验对照。
 - 共享专家与 routed experts 默认走 CPU；attention/GDN 大投影、MTP 头 → NPU；lm_head 在 decode 默认走两核 CPU，在 prefill 末尾走 NPU。
-- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；out_proj 在 decode 默认走 AVX-512 CPU，在 prefill 默认走 NPU。
+- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；out_proj 在 decode/prefill 均默认走 AVX-512 CPU，`NPU_OUT_PROJ=1` 保留 prefill NPU 对照。64-token 两轮 CPU 3871/3958ms、NPU 4393/4653ms。
 - GDN qkv+z、attention q+k+v 默认共同复用 N12288；decode 暖态约 75–100ms/token，65-token prefill 约 6–6.3s。
 
 规划结构（见 docs/M2_ARCH.md §3）：
@@ -129,7 +129,8 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   M2 两行共享一次 W4 解包和 B 加载。K2048/N12288 随机与独立行 PASS，1000 次均值
   0.678ms vs M1×2 1.012ms；N10240 0.619ms vs 0.760ms。K4096/N2048 仍确定性
   ERT timeout；通用 M4 数值 FAIL。`NPU_M2=1` 实验路径默认关闭，完整 64-token
-  chunk 两轮平均约快 4.7%；65-token 因尾 M1/BO 开销仍无收益，默认保持 M1。
+  chunk 配 CPU out 为 3447 vs 3877ms（约快 11.1%）；65-token 为 3943 vs 3863ms，
+  尾 M1/BO 开销仍无收益，默认保持 M1。
 - M=1 K4096/N2048 已删除无效 ping-pong 并接默认资产：暖态 avg 0.332→0.221ms；
   65-token prefill 49.63→46.21s，输出一致、38193 次调用 0 flake。
 - 默认使用两核单份匿名模型驻留（`BAA_MMAP=1` 回退）、SMT host（`MOE_HOST_SIBLING=0`

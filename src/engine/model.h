@@ -81,7 +81,7 @@ struct Model {
     else mv(w, x, y);
   }
   void mv_out_prefill(const BaaTensor& w, const float* x, float* y) {
-    if (env_flag("CPU_OUT_PROJ") && w.scheme == 3 && (w.flags & 1)) cpu_mv_pretiled_fast(w, x, y);
+    if (!env_flag("NPU_OUT_PROJ") && w.scheme == 3 && (w.flags & 1)) cpu_mv_pretiled_fast(w, x, y);
     else mv(w, x, y);
   }
   void mv_named(const BaaTensor& w, const std::string& name, const float* x, float* y) {

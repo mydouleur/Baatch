@@ -4,7 +4,7 @@
 
 ## 当前设计
 
-- **共享专家与 XBF2/XBF4 routed experts 默认走 CPU；attention/GDN 大投影、MTP 头和 lm_head → NPU；out_proj 在 decode 默认走 AVX-512 CPU，在 prefill 默认走 NPU**。
+- **共享专家与 XBF2/XBF4 routed experts 默认走 CPU；attention/GDN 大投影、MTP 头和 lm_head → NPU；out_proj 在 decode/prefill 均默认走 AVX-512 CPU，`NPU_OUT_PROJ=1` 保留 prefill NPU 对照**。
 - **XBF2 + imatrix routed experts → CPU**。
 - **embedding 查表、router/top-k、采样和 fallback → CPU**；其他部件只有在 CPU 综合性价比明显更好时才切到 CPU。
 - `.baa` 容器保存逻辑形状与布局 flags，量化格式与后端可独立演进。

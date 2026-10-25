@@ -164,8 +164,8 @@ Backend：
 
 ### 10.3 v1 引擎分工（2026-10-25 实测修订）
 
-- **NPU（默认主路径）**：attention/GDN 大投影、MTP 头及输出头；out_proj 在 prefill 默认走 NPU。小投影是否留在 NPU 由总耗时决定。
-- **CPU（默认主路径）**：共享专家、XBF2 与 XBF4 routed experts、GDN 状态递推、embedding 查表、router/top-k、采样和 fallback；out_proj 在 decode 默认走 AVX-512 CPU。XBF4 回 CPU 是实测总成本决策，不与 XBF2 的量化格式或 imatrix 工艺混淆。
+- **NPU（默认主路径）**：attention/GDN 大投影、MTP 头及输出头；prefill out_proj 的 `NPU_OUT_PROJ=1` 仅作对照。小投影是否留在 NPU 由总耗时决定。
+- **CPU（默认主路径）**：共享专家、XBF2 与 XBF4 routed experts、GDN 状态递推、embedding 查表、router/top-k、采样和 fallback；out_proj 在 decode/prefill 均默认走 AVX-512 CPU。64-token 两轮 CPU 3871/3958ms、NPU 4393/4653ms。XBF4 回 CPU 是实测总成本决策，不与 XBF2 的量化格式或 imatrix 工艺混淆。
 - **禁止错误分流**：不得仅按专家/非专家机械分配；分发必须同时看 scheme、功耗、带宽、调用地板和同步成本。
 - **当前实现**：共享与 routed experts 默认 CPU；GDN qkv+z、attention q+k+v 合并为 fused projections，暖态约 0.30–0.35s/token；65-token prefill 9.51s、5283 次调用 0 flake。`--npu-xbf4-experts`、`NPU_SHARED_DOWN`、`NPU_OUT_PROJ` 仅保留为实验对照。量化噪声可能改变近并列路由及后续 greedy token，质量门另行验收。当前容器仍是朴素 absmax，XBF2 的 imatrix 质量版尚未落地。
 - 性能目标暂不写死：先完成正确分工与数值闭环，再测 NPU/CPU 并发带宽、同步成本和整机功耗。43/90+ tok/s 均为早期预算，不是实测结果。
