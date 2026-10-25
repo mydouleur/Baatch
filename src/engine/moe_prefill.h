@@ -42,7 +42,7 @@ static void moe_prefill(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace& w,
     float* xn = w.xn.data() + (size_t)tok * H;
     float* logits = w.logits.data() + (size_t)tok * NE;
     m.nrm(*p.norm, x, H, xn, true);
-    if (p.router->scheme == 5) gemv_f32_rows(p.router->f32(), 0, NE, H, xn, logits);
+    if (p.router->scheme == 5) gemv_f32(m.pool, p.router->f32(), NE, H, xn, logits);
     else m.mv(*p.router, xn, logits);
     float mx = *std::max_element(logits, logits + NE), sum = 0.f;
     for (int e = 0; e < NE; e++) { logits[e] = expf(logits[e] - mx); sum += logits[e]; }

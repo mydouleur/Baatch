@@ -54,7 +54,7 @@ static void direct_prepare(Model& m, const MoeLayerPlan& p, DirectMoeWorkspace& 
   using namespace Cfg;
   auto t0 = std::chrono::steady_clock::now();
   m.nrm(*p.norm, xin, H, w.xn.data(), true);
-  if (p.router->scheme == 5) gemv_f32_rows(p.router->f32(), 0, NE, H, w.xn.data(), w.logits.data());
+  if (p.router->scheme == 5) gemv_f32(m.pool, p.router->f32(), NE, H, w.xn.data(), w.logits.data());
   else m.mv(*p.router, w.xn.data(), w.logits.data());
   float mx = *std::max_element(w.logits.begin(), w.logits.end());
   float sum = 0;

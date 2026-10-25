@@ -31,6 +31,7 @@ struct NpuBackend {
   struct Shape {
     std::shared_ptr<xrt::hw_context> hw;
     xrt::kernel kernel;
+    std::unique_ptr<xrt::run> run;
     xrt::bo bi, ba, bc;
     unsigned instr_words;
     int K, N;
@@ -248,7 +249,7 @@ struct NpuBackend {
     float* y;
     float sx;
     int N, physical_N;
-    std::unique_ptr<xrt::run> run;
+    xrt::run* run;
   };
   bool busy = false;
 
@@ -256,10 +257,14 @@ struct NpuBackend {
     Shape& s = *j.shape;
     memset(s.bc.map(), 0, j.physical_N * 2);
     sync_bo(s.bc, XCL_BO_SYNC_BO_TO_DEVICE);
-    j.run = std::make_unique<xrt::run>(s.kernel);
-    j.run->set_arg(0, 3);
-    j.run->set_arg(1, s.bi); j.run->set_arg(2, s.instr_words);
-    j.run->set_arg(3, s.ba); j.run->set_arg(4, *j.weights); j.run->set_arg(5, s.bc);
+    if (!s.run) {
+      s.run = std::make_unique<xrt::run>(s.kernel);
+      s.run->set_arg(0, 3);
+      s.run->set_arg(1, s.bi); s.run->set_arg(2, s.instr_words);
+      s.run->set_arg(3, s.ba); s.run->set_arg(5, s.bc);
+    }
+    s.run->set_arg(4, *j.weights);
+    j.run = s.run.get();
     j.run->start();
   }
 
