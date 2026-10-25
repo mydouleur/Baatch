@@ -2,10 +2,10 @@
 
 ## 当前定案
 
-- XBF4 routed experts → NPU。
-- XBF2 + imatrix routed experts → CPU。
-- 共享专家、attention/GDN 投影、MTP 头、lm_head → NPU。
-- embedding、router/top-k、采样和 fallback → CPU；其他部件仅在 CPU 综合性价比明显更好时切到 CPU。
+- XBF2/XBF4 routed experts 默认走 CPU；XBF4 的 NPU 路径仅留实验对照。
+- 共享专家、attention/GDN 大投影、MTP 头、lm_head → NPU。
+- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；其他部件按实测总成本分流。
+- 默认 CPU routed experts 与 NPU shared down 重叠，暖态约 0.74–0.76s/token；65-token prefill 41.83s、0 flake。
 
 ## 已完成
 

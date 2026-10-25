@@ -12,7 +12,7 @@
 ## 2. 容器与量化
 
 - `.baa` 为厂商中立容器，目录保存逻辑 shape，flags 描述物理布局。
-- **XBF4 routed experts → NPU**。
+- **XBF2/XBF4 routed experts 默认走 CPU（2026-10-25 实测修订）；XBF4 NPU 仅留实验对照**。
 - **XBF2 routed experts + imatrix → CPU**。
 - 共享专家、attention/GDN 投影、MTP 头和 lm_head → NPU。
 - embedding 查表、router/top-k、采样和 fallback → CPU；其他部件只有在 CPU 综合性价比明显更好时才切到 CPU。
@@ -35,7 +35,7 @@ serve/CLI（后续）
 
 ## 4. Decode
 
-- XBF4 routed experts 在 NPU 执行，XBF2 routed experts 在 CPU 执行，MoE reduce 保持原语义。
+- XBF2/XBF4 routed experts 默认在 CPU 执行，NPU shared down 与其重叠，MoE reduce 保持原语义。
 - embedding 查表留在 CPU；router/top-k 和采样留在 CPU。
 - 多形状切换、无效 padding、权重 BO 缓存和同步成本需要分别计量，不能只看 kernel GB/s。
 - uniform 是减少切换的过渡实验，不是最终低功耗格式。
@@ -44,7 +44,7 @@ serve/CLI（后续）
 
 - M=1 已闭环：GDN/attention 64-token 分块，prompt lm_head 只计算末 token。
 - prefill 与 decode 共享 conv/SSM/KV 状态，65-token 全模型对拍一致。
-- M>1 旨在复用权重 tile，但随机激活尚未闭合，未接入引擎。
+- M>1 仅在 K2048/N2048 闭合，多块 N4096/N8192 与 K4096 尚未闭合，未接入引擎。
 
 ## 6. MTP（后续）
 
@@ -54,7 +54,7 @@ serve/CLI（后续）
 
 ## 7. 当前差距与路线
 
-1. XBF4 routed experts 的 NPU 数值与全模型验收。
+1. XBF4 routed experts 的 NPU 数值已验收，总成本更高，默认改回 CPU。
 2. 多形状切换、无效 padding 和缓存预算优化。
 3. prefill M>1 与 decode/prefill 性能功耗基线。
 4. MTP 与接受率验证。

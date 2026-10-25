@@ -162,12 +162,12 @@ Backend：
 
 量化工艺：**XBF2 routed experts 必须使用 Tiel 公开 imatrix 加权**（`models/tiel_imatrix.gguf`，4900 万字符代码语料校准，MIT；imatrix 是量化时原料，推理时不在场）。XBF4 当前先用对称量化，后续再由质量门决定是否增加校准。
 
-### 10.3 v1 引擎分工（2026-10-24 用户复核定案）
+### 10.3 v1 引擎分工（2026-10-25 实测修订）
 
-- **NPU（默认主路径）**：全部 XBF4 routed experts、共享专家、attention/GDN 投影、MTP 头及输出头。XBF4 不应仅因属于 routed expert 就固定留在 CPU。
-- **CPU（明确适合的部件）**：XBF2 routed experts + imatrix、embedding 查表、router/top-k、采样和 fallback。其他部件只有在 CPU 的功耗与速度综合性价比明显更好时才切到 CPU。
-- **禁止错误分流**：不得把 XBF4 routed experts 与 XBF2 混为一谈按专家统一分配；分发必须同时看 scheme、功耗、带宽和同步成本。
-- **当前实现**：`--npu-xbf4-experts` 已把 XBF4 routed experts 按需转 tile 后分发到 NPU，XBF2 保持 CPU。40 层 80 个 GEMV 全部 PASS，最大 rel_l2=0.00546；独立生成及 prefill/decode 一致，0 flake。量化噪声可能改变近并列路由及后续 greedy token，质量门另行验收。当前容器仍是朴素 absmax，XBF2 的 imatrix 质量版尚未落地。
+- **NPU（默认主路径）**：共享专家、attention/GDN 大投影、MTP 头及输出头。小投影是否留在 NPU 由总耗时决定。
+- **CPU（默认主路径）**：XBF2 与 XBF4 routed experts、GDN 状态递推、embedding 查表、router/top-k、采样和 fallback。XBF4 回 CPU 是实测总成本决策，不与 XBF2 的量化格式或 imatrix 工艺混淆。
+- **禁止错误分流**：不得仅按专家/非专家机械分配；分发必须同时看 scheme、功耗、带宽、调用地板和同步成本。
+- **当前实现**：默认 CPU routed experts＋NPU shared down 重叠，暖态约 0.74–0.76s/token，优于 NPU 专家路径约 1.2s/token；65-token prefill 41.83s、16753 次调用 0 flake。`--npu-xbf4-experts` 仅保留为实验对照。量化噪声可能改变近并列路由及后续 greedy token，质量门另行验收。当前容器仍是朴素 absmax，XBF2 的 imatrix 质量版尚未落地。
 - 性能目标暂不写死：先完成正确分工与数值闭环，再测 NPU/CPU 并发带宽、同步成本和整机功耗。43/90+ tok/s 均为早期预算，不是实测结果。
 - MTP 后续沿用同一分工；草案与验证必须复用相同输出语义，并实测接受率和净加速。
 

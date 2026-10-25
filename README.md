@@ -4,7 +4,7 @@
 
 ## 当前设计
 
-- **XBF4 routed experts、共享专家、attention/GDN 投影、MTP 头和 lm_head → NPU**。
+- **XBF2/XBF4 routed experts 默认走 CPU；共享专家、attention/GDN 大投影、MTP 头和 lm_head → NPU**。
 - **XBF2 + imatrix routed experts → CPU**。
 - **embedding 查表、router/top-k、采样和 fallback → CPU**；其他部件只有在 CPU 综合性价比明显更好时才切到 CPU。
 - `.baa` 容器保存逻辑形状与布局 flags，量化格式与后端可独立演进。
@@ -13,7 +13,7 @@
 
 - M3 混合 decode 已完成，三次独立 32-token 输出一致、0 flake。
 - M=1 prefill 已完成，65-token 全模型 prefill/decode 输出一致。
-- XBF4 routed experts 上 NPU 仍在验收；M>1 prefill、MTP、imatrix 和 PPL 尚未完成。
+- XBF4 routed experts 的 NPU 路径已验收但总成本更高，现默认 CPU；M>1 prefill、MTP、imatrix 和 PPL 尚未完成。
 - uniform 仅是减少切换的过渡实验，不是最终格式。
 
 ## 文档

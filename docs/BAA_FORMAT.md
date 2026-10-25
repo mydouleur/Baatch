@@ -69,7 +69,7 @@ superblock(256) = [2B BF16 scale][64B 位组数据]
 ## 专家粒度位宽与后端（v1+ 不变量）
 
 - 路由专家张量（`ffn_*_exps`）在 .baa 内**按专家子块存储**，每个专家子块带独立 scheme 字节；引擎分发禁止按层假设统一位宽。
-- **XBF4 routed experts → NPU；XBF2 + imatrix routed experts → CPU**。不得把所有 routed experts 按类别统一分配后端。
+- **XBF2/XBF4 routed experts 默认走 CPU（2026-10-25 总成本实测）**；NPU XBF4 路径仅留实验对照。不得把所有 routed experts 按类别统一分配后端。
 - 冷/热配比是打包期决策，容器与引擎均无感知；改配比 = 重打包 + 改 NPU/CPU 归属表，引擎代码不动。
 
 ## 不变量

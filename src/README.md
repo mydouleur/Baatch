@@ -1,11 +1,11 @@
 # src/ — Baatch 引擎本体（M2' 起）
 
-## 当前分工（用户 2026-10-24 复核）
+## 当前分工（2026-10-25 实测修订）
 
-- XBF4 routed experts、共享专家、attention/GDN 投影、MTP 头、lm_head → NPU。
-- XBF2 + imatrix routed experts → CPU。
-- embedding、router/top-k、采样和 fallback → CPU；其他部件仅在 CPU 综合性价比明显更好时切到 CPU。
-- `--npu-xbf4-experts` 已支持 XBF4 routed experts 按需转 tile 后走 NPU，XBF2 保持 CPU。40 层 80 个 GEMV 全部 PASS，最大 rel_l2=0.00546；独立生成及 prefill/decode 一致，0 flake。
+- XBF2/XBF4 routed experts 默认走 CPU；`--npu-xbf4-experts` 仅作实验对照。
+- 共享专家、attention/GDN 大投影、MTP 头、lm_head → NPU。
+- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；其他部件按实测总成本分流。
+- NPU shared down 与 CPU routed experts 重叠，暖态约 0.74–0.76s/token；65-token prefill 41.83s、0 flake。
 
 规划结构（见 docs/M2_ARCH.md §3）：
 
@@ -98,7 +98,7 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
 
 - 现有 writer `--npu-layout dense` 覆盖 qkv/q_proj、z、out/o_proj、k/v、共享专家投影和
   lm_head；embedding 保持行主序查表，router/小投影和 routed experts 留 CPU。
-  这是尚未完成新分工的旧实现，最终 XBF4 routed experts 也应迁移到 NPU。
+  XBF4 routed experts 的 NPU 路径已验收，但总成本高于 CPU，2026-10-25 起默认留在 CPU。
 - 预平铺权重的物理 N 补齐到 2048，目录 shape 保持逻辑 N，补齐行权重为零。
   引擎选择补齐后的 NPU shape，只消费逻辑 N 个输出；CPU fallback 使用同一磁盘格式。
 - k2048n2048 与 k2048n249856 上机逐位 PASS；lm_head 大矩形物理形状已闭合。

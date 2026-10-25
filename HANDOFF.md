@@ -6,13 +6,12 @@
 
 为 Tiel Coder 35B-A3B（40 层 = 30 GDN + 10 全注意力，256 专家 top-8，含 MTP）在 AMD XDNA2 NPU（Ryzen AI 9 H 365）上做低功耗推理引擎。
 
-## 当前设计定案（用户 2026-10-24 复核）
+## 当前设计定案（2026-10-25 实测修订）
 
-- **XBF4 routed experts → NPU**；不得因属于 routed expert 就固定放 CPU。
-- **XBF2 routed experts + imatrix → CPU**，使用 vnni/LUT 快路径。
-- **共享专家、attention/GDN 投影、MTP 头、lm_head → NPU**。
-- **embedding 查表、router/top-k、采样、fallback → CPU**。其他部件只有在 CPU 的功耗与速度综合性价比明显更好时才切到 CPU。
-- 分发必须同时考虑 scheme、带宽、同步成本和功耗，不按“专家/非专家”机械分流。
+- **XBF2/XBF4 routed experts 默认走 CPU**；XBF4 的 NPU 路径仅留实验对照。
+- **共享专家、attention/GDN 大投影、MTP 头、lm_head → NPU**。
+- **GDN 状态递推、embedding、router/top-k、采样、fallback → CPU**。其他部件按实测总成本分流。
+- 默认 CPU routed experts 与 NPU shared down 重叠；不得仅按“专家/非专家”机械分流。
 
 ## 目录地图
 
@@ -31,6 +30,7 @@
 ## 当前实现状态
 
 - **M3 功能闭环**：NPU 密集 decode + CPU routed experts；三次独立 32-token 输出一致，累计 24849 次调用、0 flake。
+- **2026-10-25 分流实测**：GDN 递推仅约 9ms/token，暂缓双核；XBF4 gate_up+down 都回 CPU 后约 0.85–0.93s/token，shared down 与 CPU routed experts 重叠后约 0.74–0.76s/token。65-token 默认路径 prefill 41.83s、16753 次调用 0 flake。K2048/N2048 的无效 ping-pong 也已接入默认资产。
 - **M=1 prefill 已闭环**：GDN/attention 64-token 分块，65-token 全模型 prefill/decode 输出一致。
 - **uniform 是过渡实验**：约 171–220ms/token，物理流量 4.73GB/token；dense 为 1.185GB/token，uniform 不是最终低功耗格式。
 - **XBF4 routed experts NPU 数值路径已验收**：按需 host 转 tile + 512MB 缓存；40 层 80 个 GEMV 全部 PASS，最大 rel_l2=0.00546。两次独立 8-token 输出一致，11420 次调用、0 flake；prefill/decode 一致。量化噪声可改变近并列路由及后续 greedy token，不要求与 CPU 逐 token 相同，质量门留待后续。
@@ -42,9 +42,9 @@
 
 ## 下一步顺序
 
-1. 修正并验收 XBF4 routed experts 的 NPU 路径，保持 XBF2 在 CPU。
-2. 优化 NPU 多形状切换和无效 padding，保留 CPU 仅做明确适合的部件。
-3. 闭合 prefill M>1，建立 decode/prefill 性能与功耗基线。
+1. 继续分解多形状切换、投影和 MoE 成本，按总收益选择 CPU/NPU。
+2. 优化 prefill 的按专家 token batching；dense M>1 仅在全部主形状闭合后接入。
+3. 建立 decode/prefill 性能、功耗与长上下文内存基线。
 4. 实现 MTP 并实测接受率、净加速。
 5. 最后做 imatrix 质量版、探针、PPL、代码任务与路由一致性。
 
