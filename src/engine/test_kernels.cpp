@@ -59,16 +59,34 @@ static int run_case(int R, int C, std::mt19937& rng) {
       }
     }
   }
+  constexpr int M = 4;
+  std::vector<float> sums_m(M * sumxq.size()), sx_m(M, sx), ym((size_t)M * R);
+  for (int m = 0; m < M; m++)
+    memcpy(sums_m.data() + (size_t)m * sumxq.size(), sumxq.data(), sumxq.size() * sizeof(float));
   if constexpr (BITS == 4) {
-    std::vector<int8_t> xe(C / 2), xo(C / 2);
+    std::vector<int8_t> xe(C / 2), xo(C / 2), xe_m(M * C / 2), xo_m(M * C / 2);
     xq_split4(xq.data(), C, xe.data(), xo.data());
     gemv_xbf4_rows(w.data(), 0, R, C, xe.data(), xo.data(), sumxq.data(), sx, y.data());
+    for (int m = 0; m < M; m++) {
+      memcpy(xe_m.data() + (size_t)m * C / 2, xe.data(), C / 2);
+      memcpy(xo_m.data() + (size_t)m * C / 2, xo.data(), C / 2);
+    }
+    gemm_xbf4_rows(w.data(), 0, R, C, M, R, xe_m.data(), xo_m.data(), sums_m.data(), sx_m.data(), ym.data());
   } else {
-    std::vector<int8_t> xq4buf(C);
+    std::vector<int8_t> xq4buf(C), xq4m(M * C);
     xq_split2(xq.data(), C, xq4buf.data());
     const int8_t* xq4[4] = {xq4buf.data(), xq4buf.data() + C/4, xq4buf.data() + C/2, xq4buf.data() + 3*C/4};
     gemv_xbf2_rows(w.data(), 0, R, C, xq4, sumxq.data(), sx, y.data());
+    for (int m = 0; m < M; m++) memcpy(xq4m.data() + (size_t)m * C, xq4buf.data(), C);
+    gemm_xbf2_rows(w.data(), 0, R, C, M, R, xq4m.data(), sums_m.data(), sx_m.data(), ym.data());
   }
+  for (int m = 0; m < M; m++) {
+    if (memcmp(ym.data() + (size_t)m * R, y.data(), R * sizeof(float)) != 0) {
+      printf("XBF%d-GEMM M=%d row=%d FAIL\n", BITS, M, m);
+      return 1;
+    }
+  }
+  printf("XBF%d-GEMM M=%d: PASS\n", BITS, M);
   // 参考（从打包数据反解）
   std::vector<uint8_t> dat(R * sb_per_row * 256 / VPB);
   std::vector<uint16_t> sc(R * sb_per_row);

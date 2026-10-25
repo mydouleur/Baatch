@@ -4,7 +4,7 @@
 struct MoePrefillWorkspace {
   int tokens;
   std::vector<float> xn, logits, sx, sums, sg, su, sh, sgate;
-  std::vector<float> acc, guv, hd, dov, hsx, hsums, gather_sums, gather_sx;
+  std::vector<float> acc, guv, hd, dov, hsx, hsums, gather_sums, gather_sx, slot_out;
   std::vector<int8_t> q, xe, xo, q4, hq, hxe, hxo, hq4, gather_q, gather_xe, gather_xo;
   std::vector<float> weights;
   std::array<std::vector<int>, Cfg::NE> expert_tokens;
@@ -26,14 +26,15 @@ struct MoePrefillWorkspace {
     hsums.resize((size_t)T * Cfg::MI / XBF_SB);
     hq.resize((size_t)T * Cfg::MI); hxe.resize((size_t)T * Cfg::MI / 2);
     hxo.resize((size_t)T * Cfg::MI / 2); hq4.resize((size_t)T * Cfg::MI);
+    slot_out.resize((size_t)std::min(T, 8) * Cfg::TOPK * Cfg::H);
   }
 };
 
-static void moe_prefill(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace& w,
-                        const float* xin, float* xout) {
+static void moe_prefill_run(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace& w,
+                            const float* xin, float* xout, int T, bool ordered_merge,
+                            const int* top_override) {
   using namespace Cfg;
-  const int T = w.tokens;
-  std::fill(w.acc.begin(), w.acc.end(), 0.f);
+  std::fill(w.acc.begin(), w.acc.begin() + (size_t)T * H, 0.f);
   for (auto& tokens : w.expert_tokens) tokens.clear();
   for (auto& slots : w.expert_slots) slots.clear();
   std::vector<std::pair<float, int>> order(NE);
@@ -49,10 +50,11 @@ static void moe_prefill(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace& w,
     for (int e = 0; e < NE; e++) { logits[e] /= sum; order[e] = {logits[e], e}; }
     std::partial_sort(order.begin(), order.begin() + TOPK, order.end(), std::greater<>());
     float wsum = 0.f;
-    for (int t = 0; t < TOPK; t++) wsum += order[t].first;
+    for (int t = 0; t < TOPK; t++) wsum += top_override ? 1.f / TOPK : order[t].first;
     for (int t = 0; t < TOPK; t++) {
-      int e = order[t].second;
-      w.weights[(size_t)tok * TOPK + t] = order[t].first / std::max(wsum, 1e-9f);
+      int e = top_override ? top_override[tok * TOPK + t] : order[t].second;
+      float weight = top_override ? 1.f / TOPK : order[t].first;
+      w.weights[(size_t)tok * TOPK + t] = weight / std::max(wsum, 1e-9f);
       w.expert_tokens[e].push_back(tok);
       w.expert_slots[e].push_back(t);
     }
@@ -137,10 +139,25 @@ static void moe_prefill(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace& w,
     }
     for (int j = 0; j < M; j++) {
       int tok = tokens[j];
-      float weight = w.weights[(size_t)tok * TOPK + w.expert_slots[e][j]];
+      int slot = w.expert_slots[e][j];
+      float weight = w.weights[(size_t)tok * TOPK + slot];
       const float* dov = w.dov.data() + (size_t)j * R;
+      if (ordered_merge) {
+        memcpy(w.slot_out.data() + ((size_t)tok * TOPK + slot) * H, dov, H * sizeof(float));
+      } else {
+        float* acc = w.acc.data() + (size_t)tok * H;
+        for (int i = 0; i < H; i++) acc[i] += weight * dov[i];
+      }
+    }
+  }
+  if (ordered_merge) {
+    for (int tok = 0; tok < T; tok++) {
       float* acc = w.acc.data() + (size_t)tok * H;
-      for (int i = 0; i < H; i++) acc[i] += weight * dov[i];
+      for (int t = 0; t < TOPK; t++) {
+        float weight = w.weights[(size_t)tok * TOPK + t];
+        const float* out = w.slot_out.data() + ((size_t)tok * TOPK + t) * H;
+        for (int i = 0; i < H; i++) acc[i] += weight * out[i];
+      }
     }
   }
   for (int tok = 0; tok < T; tok++) {
@@ -150,4 +167,24 @@ static void moe_prefill(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace& w,
       xout[at] = xin[at] + w.acc[at] + gate * w.sh[at];
     }
   }
+}
+
+static void moe_prefill_legacy(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace& w,
+                               const float* xin, float* xout, const int* top_override = nullptr) {
+  moe_prefill_run(m, p, w, xin, xout, w.tokens, false, top_override);
+}
+
+static void moe_prefill8(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace& w,
+                         const float* xin, float* xout, const int* top_override = nullptr) {
+  for (int base = 0; base < w.tokens; base += 8) {
+    int count = std::min(8, w.tokens - base);
+    moe_prefill_run(m, p, w, xin + (size_t)base * Cfg::H, xout + (size_t)base * Cfg::H,
+                    count, true, top_override ? top_override + (size_t)base * Cfg::TOPK : nullptr);
+  }
+}
+
+static void moe_prefill(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace& w,
+                        const float* xin, float* xout) {
+  if (env_flag("MOE_PREFILL8")) moe_prefill8(m, p, w, xin, xout);
+  else moe_prefill_legacy(m, p, w, xin, xout);
 }

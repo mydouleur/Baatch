@@ -137,6 +137,12 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   对每层每块直接计算同量化、同 BF16 块序 CPU reference。65/256-token 共 320/1280 块全值精确 PASS，
   M8 与 M1 的 65+64 OUT_IDS 一致、0 flake；总 prefill 两轮分别快 5.05–7.09% 和 9.42–11.74%。
   NPU 与默认 CPU 输出 IDs 不保证一致，因此仅保留实验开关。旧 M2 根因与高频 Runner 重建零块均未宣称修复。
+- `MOE_PREFILL8=1` 启用 8-token MoE 实验：块内先算完全部 router/top-k，再按 expert 聚合；
+  XBF4 同一权重解包服务全部行，专家输出按原 top-k slot 顺序归并。layer0/layer10 的自然、
+  固定、随机路由与 65-token 尾块均和逐 token direct 逐位同哈希，XBF2/XBF4 GEMM 单测 PASS。
+  固定 256-token CPU/M8 平均 prefill 为 9779.4/8334.3ms（26.18/30.72 tok/s），MoE 为
+  3359.1/3239.7ms；65-token 和变化 prompt 也有收益。该路径与 direct 一致而非旧整段归并，
+  OUT_IDS 不保证相同，默认关闭；decode 调度与数学不变。
 - M=1 K4096/N2048 已删除无效 ping-pong 并接默认资产：暖态 avg 0.332→0.221ms；
   65-token prefill 49.63→46.21s，输出一致、38193 次调用 0 flake。
 - 默认使用两核单份匿名模型驻留（`BAA_MMAP=1` 回退）、SMT host（`MOE_HOST_SIBLING=0`

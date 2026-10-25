@@ -125,18 +125,36 @@ int main(int argc, char** argv) { try {
   for (float& v : x) v = dist(rng);
   if (prefill_tokens) {
     int T = prefill_tokens;
-    std::vector<float> out((size_t)T * Cfg::H);
+    std::vector<int> forced((size_t)T * Cfg::TOPK);
+    for (int tok = 0; tok < T; tok++) {
+      for (int t = 0; t < Cfg::TOPK; t++) forced[tok * Cfg::TOPK + t] = t;
+      if (top8 == "random") {
+        std::array<int, Cfg::NE> experts;
+        for (int e = 0; e < Cfg::NE; e++) experts[e] = e;
+        for (int t = 0; t < Cfg::TOPK; t++) {
+          std::uniform_int_distribution<int> pick(t, Cfg::NE - 1);
+          int j = pick(route_rng);
+          std::swap(experts[t], experts[j]);
+          forced[tok * Cfg::TOPK + t] = experts[t];
+        }
+      }
+    }
+    const int* top_override = top8 == "model" ? nullptr : forced.data();
+    std::vector<float> out((size_t)T * Cfg::H), legacy((size_t)T * Cfg::H);
     auto direct_start = std::chrono::steady_clock::now();
     for (int tok = 0; tok < T; tok++)
       direct_moe(m, *plan, direct_workspace, x.data() + (size_t)tok * Cfg::H,
-                 reference.data() + (size_t)tok * Cfg::H);
+                 reference.data() + (size_t)tok * Cfg::H, nullptr, top_override ? top_override + tok * Cfg::TOPK : nullptr);
     double direct_ms = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - direct_start).count() * 1e3;
     MoePrefillWorkspace prefill_workspace(T);
-    double total = 0, best = 1e30;
+    double total = 0, best = 1e30, legacy_total = 0;
     for (int r = 0; r < rounds; r++) {
       auto start = std::chrono::steady_clock::now();
-      moe_prefill(m, *plan, prefill_workspace, x.data(), out.data());
+      moe_prefill_legacy(m, *plan, prefill_workspace, x.data(), legacy.data(), top_override);
+      legacy_total += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() * 1e3;
+      start = std::chrono::steady_clock::now();
+      moe_prefill8(m, *plan, prefill_workspace, x.data(), out.data(), top_override);
       double ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() * 1e3;
       total += ms; best = std::min(best, ms);
     }
@@ -146,9 +164,14 @@ int main(int argc, char** argv) { try {
       num += d * d; den += (double)reference[i] * reference[i];
       max_rel = std::max(max_rel, fabs(d) / (fabs(reference[i]) + 1e-4));
     }
-    printf("PREFILL_MOE layer=%d tokens=%d rounds=%d direct_ms=%.3f batch_mean_ms=%.3f batch_min_ms=%.3f rel_l2=%.6g max_rel=%.6g\n",
-           layer, T, rounds, direct_ms, total / rounds, best, sqrt(num / (den + 1e-12)), max_rel);
-    return max_rel < 0.02 ? 0 : 3;
+    uint64_t direct_hash = hash_output(reference), batch_hash = hash_output(out), legacy_hash = hash_output(legacy);
+    printf("PREFILL_MOE layer=%d tokens=%d top8=%s rounds=%d direct_ms=%.3f legacy_mean_ms=%.3f batch_mean_ms=%.3f batch_min_ms=%.3f rel_l2=%.6g max_rel=%.6g\n",
+           layer, T, top8.c_str(), rounds, direct_ms, legacy_total / rounds, total / rounds, best,
+           sqrt(num / (den + 1e-12)), max_rel);
+    printf("PREFILL_HASH direct=%016llx batch=%016llx legacy=%016llx %s\n",
+           (unsigned long long)direct_hash, (unsigned long long)batch_hash, (unsigned long long)legacy_hash,
+           direct_hash == batch_hash ? "PASS" : "FAIL");
+    return max_rel < 0.02 && direct_hash == batch_hash ? 0 : 3;
   }
 
   if (const char* gate = getenv("BENCH_GATE")) {
