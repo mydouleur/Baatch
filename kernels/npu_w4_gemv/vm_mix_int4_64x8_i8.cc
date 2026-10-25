@@ -104,6 +104,76 @@ static void vecmat_w4a16int(const int16_t *__restrict a_i16, const int8_t *__res
   aie::store_v(c, aie::add(cacc, prod).template to_vector<bfloat16>());
 }
 
+static void vecmat_w4a16int_m2(const int16_t *__restrict a0, const int16_t *__restrict a1,
+                               const int8_t *__restrict b,
+                               bfloat16 *__restrict c0, bfloat16 *__restrict c1) {
+  constexpr unsigned K = 128;
+  constexpr unsigned N = 64;
+  aie::set_rounding(aie::rounding_mode::conv_even);
+  const int8_t *__restrict pW = b;
+  const bfloat16 *__restrict pS = reinterpret_cast<const bfloat16 *>(b + N * K / 2);
+  const int8_t *__restrict pZ = b + N * K / 2 + N * 2;
+  aie::accum<acc32, 64> acc0 = aie::zeros<acc32, 64>();
+  aie::accum<acc32, 64> acc1 = aie::zeros<acc32, 64>();
+  for (unsigned kh = 0; kh < 2; kh++) {
+    for (unsigned i = 0; i < 8; ++i) {
+      for (unsigned j = 0; j < 8; ++j) {
+        const aie::vector<int8, 16> Bzp_row = aie::load_v<16>(pZ + j * 16);
+        const aie::vector<int8, 64> Bzp = Bzp_row.template grow_replicate<64>();
+        const aie::vector<int8, 32> B_packed =
+            aie::load_v<32>(pW + ((kh * 8 + i) * 8 + j) * 32);
+        const aie::vector<uint4, 64> B_uint4 = B_packed.template cast_to<uint4>();
+        const aie::vector<uint8, 64> B_uint8 = B_uint4.template unpack();
+        const aie::vector<int8, 64> B_int8 = B_uint8.template cast_to<int8>();
+        const aie::vector<int8, 64> B_z = aie::sub(B_int8, Bzp);
+        aie::store_v(b_buf_i16 + (i * 8 + j) * 64, B_z.template unpack_sign<int16>(true));
+      }
+    }
+    const int16_t *__restrict a_ptr0 = a0 + kh * 64;
+    const int16_t *__restrict a_ptr1 = a1 + kh * 64;
+    const int16_t *__restrict b_ptr = b_buf_i16;
+    AIE_LOOP_MIN_ITERATION_COUNT(8)
+    for (unsigned rr = 0; rr < 8; ++rr) {
+      int16_t a_s[2][8];
+      for (int m = 0; m < 2; m++) {
+        const int16_t* ap = m ? a_ptr1 : a_ptr0;
+        for (int t = 0; t < 8; t += 2) {
+          uint32_t av = *reinterpret_cast<const uint32_t *>(ap + t);
+          a_s[m][t] = (int16_t)(av & 0xFFFF);
+          a_s[m][t + 1] = (int16_t)(av >> 16);
+        }
+      }
+#define MAC_M2(t) { \
+      const aie::vector<int16, 64> bv = aie::concat( \
+          aie::load_v<8>(b_ptr + 0 * 64 + t * 8), aie::load_v<8>(b_ptr + 1 * 64 + t * 8), \
+          aie::load_v<8>(b_ptr + 2 * 64 + t * 8), aie::load_v<8>(b_ptr + 3 * 64 + t * 8), \
+          aie::load_v<8>(b_ptr + 4 * 64 + t * 8), aie::load_v<8>(b_ptr + 5 * 64 + t * 8), \
+          aie::load_v<8>(b_ptr + 6 * 64 + t * 8), aie::load_v<8>(b_ptr + 7 * 64 + t * 8)); \
+      acc0 = aie::mac(acc0, a_s[0][t], bv); \
+      acc1 = aie::mac(acc1, a_s[1][t], bv); }
+      MAC_M2(0) MAC_M2(1) MAC_M2(2) MAC_M2(3)
+      MAC_M2(4) MAC_M2(5) MAC_M2(6) MAC_M2(7)
+#undef MAC_M2
+      b_ptr += 512;
+      a_ptr0 += 8;
+      a_ptr1 += 8;
+    }
+  }
+  const aie::vector<bfloat16, 64> sv = aie::load_v<64>(pS);
+  const aie::vector<int32, 64> acci0 = acc0.template to_vector<int32>();
+  const aie::vector<bfloat16, 64> accb0 = aie::to_float<bfloat16>(acci0);
+  aie::accum<accfloat, 64> prod0 = aie::mul(accb0, sv);
+  aie::accum<accfloat, 64> cacc0;
+  cacc0.from_vector(aie::load_v<64>(c0));
+  aie::store_v(c0, aie::add(cacc0, prod0).template to_vector<bfloat16>());
+  const aie::vector<int32, 64> acci1 = acc1.template to_vector<int32>();
+  const aie::vector<bfloat16, 64> accb1 = aie::to_float<bfloat16>(acci1);
+  aie::accum<accfloat, 64> prod1 = aie::mul(accb1, sv);
+  aie::accum<accfloat, 64> cacc1;
+  cacc1.from_vector(aie::load_v<64>(c1));
+  aie::store_v(c1, aie::add(cacc1, prod1).template to_vector<bfloat16>());
+}
+
 extern "C" {
 
 void vecmat_vectorized_bf16_bf16(bfloat16 *a_in, int8 *b_in, bfloat16 *c_out) {
@@ -115,7 +185,11 @@ void zero_vectorized_bf16(bfloat16 *c_out) { zero_vectorized<bfloat16, 64, 1>(c_
 #ifdef DIM_M
 void vecmat_vectorized_bf16_bf16_m(bfloat16 *a_in, int8 *b_in, bfloat16 *c_out) {
   const int16_t* q = reinterpret_cast<const int16_t *>(a_in);
+#if DIM_M == 2
+  vecmat_w4a16int_m2(q, q + 128, b_in, c_out, c_out + 64);
+#else
   for (int m = 0; m < DIM_M; m++) vecmat_w4a16int(q + m * 128, b_in, c_out + m * 64);
+#endif
 }
 
 void zero_vectorized_bf16_m(bfloat16 *c_out) {
