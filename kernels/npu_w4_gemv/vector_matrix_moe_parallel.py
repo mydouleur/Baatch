@@ -1,0 +1,270 @@
+#
+# This file is licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# (c) Copyright 2025 AMD Inc.
+# (c) Copyright 2025 University of Illinois Urbana-Champaign.
+import numpy as np
+from ml_dtypes import bfloat16
+import argparse
+
+from aie.extras.context import mlir_mod_ctx
+from aie.dialects.aie import *
+from aie.dialects.aiex import *
+try:
+    from aie.helpers.dialects.ext.scf import _for as range_
+except ModuleNotFoundError:
+    from aie.helpers.dialects.scf import _for as range_  # mlir_aie 1.3.4（无 ext 层）
+try:
+    from aie.helpers.taplib import TensorAccessPattern
+except ImportError:
+    pass  # 未使用；1.3.4/1.4.4 taplib 命名不同
+
+def ceildiv(a, b):
+    return (a + b - 1) // b
+
+def my_matmul(dev, N, K, M=1, E=1):
+    assert M == 1 and E == 4
+    k = 128
+    n = 64
+    new_n = n // 2 + 2
+    n_cols = E
+    n_rows = 4
+
+    A_sz = E * K
+    B_sz = K * N // 2 + K * N // n * 2
+    C_sz = E * N
+    C_sz_div_n_cols = C_sz // n_cols
+
+    N_div_n = N // n
+    K_div_k = K // k
+
+    n_x_k = n * k
+    n_x_K = n * K
+
+    A_taps = []
+    B_taps = []
+    C_taps = []
+    vectorized = True
+
+    dtype_in = bfloat16
+    dtype_in_str = "bf16"
+    dtype_in_B = np.int8
+    dtype_in_B_str = "i8"
+    dtype_out = bfloat16
+    dtype_out_str = "bf16"
+    with mlir_mod_ctx() as ctx:
+
+        if dev == "npu":
+            dev_ty = AIEDevice.npu1_4col
+        else:
+            dev_ty = AIEDevice.npu2
+
+        @device(dev_ty)
+        def device_body():
+            # GEVM: A is vector (bf16), B is matrix (int8 packed with scaling factors)
+            inA_ty = np.ndarray[(M * k,), np.dtype[dtype_in]]
+            inB_ty = np.ndarray[(k * new_n * n_rows,), np.dtype[dtype_in_B]]
+            MemC_ty = np.ndarray[(M * n * n_rows,), np.dtype[dtype_out]]
+            outC_ty = np.ndarray[(M * n,), np.dtype[dtype_out]]
+            B_ty = np.ndarray[(k, new_n), np.dtype[dtype_in_B]]
+            func_type = "vectorized" if vectorized else "scalar"
+            func_suffix = "" if M == 1 else "_m"
+
+            import inspect as _inspect
+            _LINK_ON_FUNC = "link_with" in _inspect.signature(external_func.__init__).parameters
+            _lk = f"vm_{n}x{k}.o"
+            zero = external_func(f"zero_{func_type}_{dtype_out_str}{func_suffix}", inputs=[outC_ty],
+                                 **({"link_with": _lk} if _LINK_ON_FUNC else {}))
+            vecmat = external_func(
+                f"vecmat_{func_type}_{dtype_in_str}_{dtype_out_str}{func_suffix}",
+                inputs=[inA_ty, B_ty, outC_ty],
+                **({"link_with": _lk} if _LINK_ON_FUNC else {}),
+            )
+
+            # Tile declarations
+            ShimTiles = [tile(i,0) for i in range(n_cols)]
+            MemTiles = [tile(i,1) for i in range(n_cols)]
+            memA_fifos = [None] * n_cols
+            inA_fifos = [None] * n_cols  # 1D: vector A is broadcast to all tiles
+            outC_fifos = [[None] * n_cols for _ in range(n_rows)]
+            inB_fifos = [[None] * n_cols for _ in range(n_rows)]  # 2D: matrix B is distributed
+            memB_fifos = [None] * n_cols
+            memC_fifos = []
+            cores = [
+                [tile(col, row) for col in range(0, n_cols)] for row in range(2, 2 + n_rows)
+            ]
+            # AIE-array data movement with object fifos
+            # Input A (vector - broadcast to all cores)
+            for col in range(n_cols):
+                memA_fifos[col] = object_fifo(
+                    f"mem_A{col}",
+                    ShimTiles[col],
+                    MemTiles[col],
+                    2,
+                    inA_ty,
+                )
+            for col in range(n_cols):
+                inA_fifos[col] = object_fifo(
+                    f"inA{col}",
+                    MemTiles[col],
+                    [cores[j][col] for j in range(n_rows)],
+                    2,
+                    inA_ty,
+                )
+                
+                object_fifo_link(memA_fifos[col], inA_fifos[col])
+
+                # Output C
+                memC_fifos.append(
+                    object_fifo(f"memC{col}", MemTiles[col], ShimTiles[col], 2, MemC_ty) 
+                )
+                for row in range(n_rows):
+                    outC_fifos[row][col] = object_fifo(
+                        f"outC{row}{col}", 
+                        cores[row][col], 
+                        MemTiles[col], 
+                        2,
+                        outC_ty,
+                    )
+
+                object_fifo_link(
+                    [outC_fifos[row][col] for row in range(n_rows)],
+                    memC_fifos[col],
+                    [M*n*j for j in range(n_rows)],
+                )
+
+                # Input B (matrix - packed int8 with scaling factors, no transformation needed)
+                memB_fifos[col] = object_fifo(
+                        f"memB{col}", 
+                        ShimTiles[col], 
+                        MemTiles[col], 
+                        2, 
+                        inB_ty,
+                        # None,
+                        # # S2MM in MemTile to convert new_n * nxk block from row-maj
+                        # # to tiled k*new_n blocks (transposed at 32-bit word granularity)
+                        # [
+                        #     [
+                        #         (k, new_n),
+                        #         (nxk // n, k * new_n),
+                        #         (new_n, 1),
+                        #     ]
+                        # ],
+                    )
+                
+                for row in range(n_rows):
+                    inB_fifos[row][col] = object_fifo(
+                        f"inB{row}{col}", 
+                        MemTiles[col], 
+                        cores[row][col], 
+                        2,
+                        B_ty,
+                        # MM2S pattern to read the transformed B tiles with new_n (includes scaling factors)
+                        # [
+                        #     (nxk_div_n, k * new_n),
+                        #     (new_n // 2, 2),
+                        #     (k, new_n),
+                        #     (2, 1),
+                        # ],
+                    )
+                
+                # Link memB to inB fifos for this column
+                object_fifo_link(
+                    memB_fifos[col], 
+                    [inB_fifos[row][col] for row in range(n_rows)],
+                    [],
+                    [new_n * k * j for j in range(n_rows)],
+                )
+
+            # Set up compute tiles
+            for row in range(n_rows):
+                for col in range(n_cols):
+                # Compute tile col
+                    @core(cores[row][col], **({} if _LINK_ON_FUNC else {"link_with": f"vm_{n}x{k}.o"}))
+                    def core_body():
+                        for _ in range_(0xFFFFFFFF):
+                            elem_out = outC_fifos[row][col].acquire(ObjectFifoPort.Produce, 1)
+                            zero(elem_out)
+                            for _ in range_(K_div_k):
+                                elem_in_a = inA_fifos[col].acquire(ObjectFifoPort.Consume, 1)
+                                elem_in_b = inB_fifos[row][col].acquire(ObjectFifoPort.Consume, 1)
+                                vecmat(elem_in_a, elem_in_b, elem_out)
+                                inA_fifos[col].release(ObjectFifoPort.Consume, 1)
+                                inB_fifos[row][col].release(ObjectFifoPort.Consume, 1)
+                            outC_fifos[row][col].release(ObjectFifoPort.Produce, 1)
+
+            # To/from AIE-array data movement
+
+            @runtime_sequence(
+                np.ndarray[(A_sz,), np.dtype[dtype_in]],
+                *([np.ndarray[(B_sz,), np.dtype[dtype_in_B]]] * E),
+                np.ndarray[(C_sz,), np.dtype[dtype_out]],
+                sym_name=f"k{K}n{N}p{E}",
+            )
+            def sequence(A, *args):
+                Bs = args[:E]
+                C = args[E]
+                num_transfer = ceildiv(N // n, n_rows)
+                num_iter = ceildiv(num_transfer, 2)
+
+                for j in range(num_iter):
+                    for pingpong in [0,1]:
+                        bd_id_base = 8 * pingpong
+                        col_base = j * 2 * n * n_rows + pingpong * n * n_rows
+                        if col_base >= N:
+                            break
+                        for col in range(n_cols):
+                            B = Bs[col]
+                            npu_dma_memcpy_nd(
+                                metadata=memA_fifos[col],
+                                bd_id=bd_id_base + 3,
+                                mem=A,
+                                offsets=[0, 0, 0, col * K],
+                                sizes=[1, 1, 1, K],
+                                strides=[0, 0, 0, 1],
+                            )
+                            for b_section in range(2):
+                                B_base_offset = K * n_rows * new_n * (2 * j + pingpong) + K * new_n // 2 * b_section
+                                B_sizes = [K // k // 2, n_rows , new_n, k]
+                                B_strides = [k * new_n, K * new_n, k, 1]
+                                npu_dma_memcpy_nd(
+                                    metadata=memB_fifos[col],
+                                    bd_id=bd_id_base + 1 + b_section,
+                                    mem=B,
+                                    offsets=[0, 0, 0, B_base_offset],
+                                    sizes=B_sizes,
+                                    strides=B_strides,
+                                )
+                            C_offset = col * N + col_base
+                            C_sizes = [1, N // n // num_transfer, 1, n]
+                            C_strides = [0, n, N, 1]
+                            npu_dma_memcpy_nd(
+                                metadata=memC_fifos[col],
+                                bd_id=bd_id_base,
+                                mem=C,
+                                offsets=[0, 0, 0, C_offset],
+                                sizes=C_sizes,
+                                strides=C_strides,
+                            )
+                        if j > 0 or (j == 0 and pingpong > 0):
+                            dma_wait(*memC_fifos)
+                dma_wait(*memC_fifos)
+    print(ctx.module)
+
+if __name__ == "__main__":
+    argparser = argparse.ArgumentParser(
+        prog="AIE Vector Matrix Multiplication MLIR Design (GEVM)",
+    )
+    argparser.add_argument("--dev", type=str, choices=["npu", "npu2"], default="npu")
+    argparser.add_argument("-N", type=int, default=4096)
+    argparser.add_argument("-K", type=int, default=4096)
+    argparser.add_argument("-M", type=int, default=1)
+    argparser.add_argument("-E", type=int, default=8)
+    args, _ = argparser.parse_known_args()
+    dev = args.dev
+    N = args.N
+    K = args.K
+    my_matmul(dev, N, K, args.M, args.E)
+                                                                                                       
