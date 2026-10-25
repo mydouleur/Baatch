@@ -132,8 +132,8 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
 - 默认使用两核单份匿名模型驻留（`BAA_MMAP=1` 回退）、SMT host（`MOE_HOST_SIBLING=0`
   回退）、66B 行缓存、XBF2 合并归约与 CPU lm_head。decode 约 53–70ms/token（14–19 tok/s），
   65-token prefill 5.87s，NPU 0 flake。常驻并发 XBF4 约 78GB/s、XBF2 约 61GB/s。
-  prefill 后台预热 decode out/lm_head 行缓存；真实 65+64 的 decode 中位 60.15ms、
-  平均 62.87ms、p95 76.8ms，TTFT 5.88s；匿名模型启动读写约 12s。
+  prefill 后台预热 decode out/lm_head 行缓存，GDN 32 头两核并行；真实 65+64 的 decode
+  中位 56.80ms、平均 59.14ms、p95 68.7ms，TTFT 5.72s；匿名模型启动读写约 12s。
   `bench_moe` 另有 direct/scheduled、固定/随机 top8
   与 GEMV/同步/量化分项；4/8 routed 线程无稳定收益，保持两线程。
 - CPU 激活量化、整数求和、偶奇/模4拆分已 AVX-512 化，单测与层对拍 PASS。

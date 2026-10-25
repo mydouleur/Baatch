@@ -52,7 +52,8 @@ static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, i
     for (int i = 0; i < KEY_DIM; i++) q[i] *= 1.f / sqrtf((float)HD);
 
     std::fill(o.begin(), o.end(), 0.f);
-    for (int j = 0; j < VH; j++) {
+    auto run_heads = [&](int begin, int end) {
+    for (int j = begin; j < end; j++) {
       float a = softplusf(alpha[t * VH + j] + dt_b[j]);
       float g = -a * expf(a_log[j]);
       float b = sigmoidf(beta[t * VH + j]);
@@ -88,6 +89,8 @@ static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, i
         o[j * HD + i] = _mm512_reduce_add_ps(acc);
       }
     }
+    };
+    m.pool.run([&](int id) { run_heads(id * VH / 2, (id + 1) * VH / 2); });
 
     for (int j = 0; j < VH; j++) {
       float* p = o.data() + j * HD;

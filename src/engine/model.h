@@ -318,7 +318,8 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
     for (int i = 0; i < KEY_DIM; i++) q[i] *= qs; }
   // delta rule（v 头 j 用 k 头 j%16 —— qwen3.5 交错序）
   std::vector<float> o(VAL_DIM, 0.f);
-  for (int j = 0; j < VH; j++) {
+  auto run_heads = [&](int begin, int end) {
+  for (int j = begin; j < end; j++) {
     float* s = st.ssm.data() + (size_t)j * HD * HD;
     const float* kj = k + (j / (VH / KH)) * HD;
     const float* qj = q + (j / (VH / KH)) * HD;
@@ -351,6 +352,8 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
       o[j * HD + i] = _mm512_reduce_add_ps(acc);
     }
   }
+  };
+  m.pool.run([&](int id) { run_heads(id * VH / 2, (id + 1) * VH / 2); });
   // gated norm：per-head RMSNorm(128) × w_norm × SiLU(z)
   const float* nw = m.T(LN(l, "linear_attn.norm.weight")).f32();
   std::vector<float> og(VAL_DIM);
