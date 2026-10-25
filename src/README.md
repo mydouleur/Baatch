@@ -1,5 +1,12 @@
 # src/ — Baatch 引擎本体（M2' 起）
 
+## 当前分工（用户 2026-10-24 复核）
+
+- XBF4 routed experts、共享专家、attention/GDN 投影、MTP 头、lm_head → NPU。
+- XBF2 + imatrix routed experts → CPU。
+- embedding、router/top-k、采样和 fallback → CPU；其他部件仅在 CPU 综合性价比明显更好时切到 CPU。
+- `--npu-xbf4-experts` 已支持 XBF4 routed experts 按需转 tile 后走 NPU，XBF2 保持 CPU。40 层 80 个 GEMV 全部 PASS，最大 rel_l2=0.00546；独立生成及 prefill/decode 一致，0 flake。
+
 规划结构（见 docs/M2_ARCH.md §3）：
 
 ```
@@ -68,13 +75,12 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   密集预平铺张量（flags bit0）自动分发 NPU；flake（整块 0）校验+重试≤3+计数；
   run 超时（ERT timeout）= 挂起语义，不重试直接 CPU 兜底。
 - **布局**：v1.1 容器 = 密集 XBF4 TileFuse 预平铺（zp=8 常数 ≡ 对称量化）+
-  专家行主序 XBF2/XBF4；目录 offset7 保留字节复用为 layout flags（bit0=预平铺）
-  ——**规范出入已报主线**（BAA_FORMAT.md 未定义该字节的此用途）。
-- **形状库**（4 个，全部上机逐位 PASS）：
+  专家行主序 XBF2/XBF4；目录 offset7 为 layout flags（bit0=预平铺），规范见 BAA_FORMAT.md。
+- **原形状库**（4 个，全部上机逐位 PASS）：
   k2048n8192（qkv/q_proj）、k2048n4096（z）、k4096n2048（out/o_proj）、k512n2048（shexp down）。
   每调用地板 ~0.1ms（小形状）/~0.26ms（8.5MB）。
-- **留 CPU**：k/v_proj、in_proj_a/b、router、shexp gate/up、norm、SSM、embed、
-  lm_head（N=248320 不被 32 整除，不适配设计）、全部专家（XBF2/XBF4 行主序）。
+- **v1.1 留 CPU**：k/v_proj、in_proj_a/b、router、shexp gate/up、norm、SSM、embed、
+  lm_head、全部专家（XBF2/XBF4 行主序）。
 - CPU 兜底：`cpu_mv_pretiled`（标量反解，仅 fallback/对拍用）。
 - **混合 decode 已端到端跑通**（per-shape xclbin 版）：3450 次 NPU 调用、**flake=0**、
   首 token `<think>` 与 HF 一致；但 **600ms/token 不达标**，归因：
@@ -83,9 +89,48 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   (b) 预平铺密集张量的 CPU 兜底当时是标量慢路径。
 - **事故记录**："单 xclbin + insts 热换"优化（4 形状 design.pdi 逐位一致所以理论可行）
   实测**挂死设备**（NPU 驱动僵尸态，进程不可杀，需重启恢复）——已回退，禁再用。
-- **当前定案**（v1.2，待设备恢复后复测）：writer 只把 (8192,2048) 的
-  in_proj_qkv/q_proj 预平铺（每 token 40 次同形状调用、**零切换**）；其余密集
-  张量回行主序走 CPU vnni4 快路径。models/ornith35_xbf24.baa 需按 v1.2 重打包
-  （写时被僵尸进程锁文件阻塞——重启后重跑 baa_writer_v1.py）。
+- **v1.2**：writer 默认只把 (8192,2048) 的 in_proj_qkv/q_proj 预平铺
+  （每 token 40 次同形状调用、**零切换**）；其余密集张量回行主序走 CPU vnni4 快路径。
 - 残余：flake 率实测（本进程 3450 运行 0 次，与 rai_explore 的 10-13% 口径不同——
   疑似与其 i8 kernel 快时序相关，我们引擎调用间隔长得多）。
+
+## M3 密集主路径（2026-10-24，功能闭环，带宽调优中）
+
+- 现有 writer `--npu-layout dense` 覆盖 qkv/q_proj、z、out/o_proj、k/v、共享专家投影和
+  lm_head；embedding 保持行主序查表，router/小投影和 routed experts 留 CPU。
+  这是尚未完成新分工的旧实现，最终 XBF4 routed experts 也应迁移到 NPU。
+- 预平铺权重的物理 N 补齐到 2048，目录 shape 保持逻辑 N，补齐行权重为零。
+  引擎选择补齐后的 NPU shape，只消费逻辑 N 个输出；CPU fallback 使用同一磁盘格式。
+- k2048n2048 与 k2048n249856 上机逐位 PASS；lm_head 大矩形物理形状已闭合。
+- NPU 超时后全局关闭本进程 NPU 后端；hw_context 由 Shape 持有，不再泄漏。
+- 密集容器 16.08GB、259 个 NPU 张量，目录审计 PASS。GDN/attention/MoE 使用同
+  XBF24 参考对拍 PASS；CPU 完整生成 OUT_IDS 保持 220,17。修复预平铺 CPU fallback
+  奇数输出误用相邻 scale 的问题。
+- NPU submit/wait 已拆分：GDN qkv 与 a/b、qkv 模式下 q 与 k/v、共享专家 down
+  与标量门控可重叠。后端限制单未完成任务，不多 context 并发提交。
+- 三次独立 32-token 混合 decode 输出完全一致；每次 8283 次调用均 flake=0，
+  无 fallback/超时。当前多形状版约 0.8–1.0s/token，瓶颈是每 token 251 次调用及切换。
+- 多 kernel xclbin 合并可运行，但同形状约 0.6ms、交替约 8ms/对，无收益；
+  --expand-load-pdis 无效。full ELF 静态 sequence 可构建，但 XRT 2.19 创建
+  context 时以 invalid stoul argument 拒绝，未进入执行；两路线暂不扩展。
+- `--npu-layout uniform` 是过渡对照：除 lm_head 外统一物理 K4096/N8192（flags bit1），
+  有效量化值不变、补齐区置零，目标先验证少量 xclbin 切换的收益；额外 padding
+  流量不是最终格式决策。uniform 32-token 输出与 dense 一致、flake=0；performance
+  暖态约 171–220ms/token，kernel 约 38GB/s。物理流量 4.73GB/token（dense 1.185GB），
+  因此只作过渡，不作为低功耗最终格式。
+
+## Prefill 与当前优化
+
+- M=1 prefill 已实现：GDN/attention 64-token 分块、prompt lm_head 只算末 token、
+  prefill→decode 状态衔接。65-token 全模型与原 decode 输出完全一致、flake=0。
+- M>1 采用打包 A/C FIFO + kernel 内权重 tile 复用；K2048/N2048 全套数值 PASS，
+  M2 0.265ms vs M1×2 0.332ms。多块 N4096/N8192 与 K4096 未闭合，未接入引擎；
+  fused `_m` 仍有 wn 车道错误，稳定版本逐行调用 M1 kernel。
+- M=1 K4096/N2048 已删除无效 ping-pong 并接默认资产：暖态 avg 0.332→0.221ms；
+  65-token prefill 49.63→46.21s，输出一致、38193 次调用 0 flake。
+- CPU 激活量化、整数求和、偶奇/模4拆分已 AVX-512 化，单测与层对拍 PASS。
+- `--npu-layout fast` 过渡实验已停止，不再缩小既定 NPU 分工。balanced 也没有实质收益。
+- `bench_moe` 支持 current/planned/batch/parallel 单层对照。planned 数值一致但暖态无显著收益；
+  E4×2 batch 数值通过但 layer0 约 12.0ms；列并行 p4 每列持完整专家，数值通过、
+  约 10.8ms，优于串行 batch 但仍慢于 current 约 9.1ms，均不接默认引擎。
+  E6、长序列 p8、独立 BD＋去除专家间等待均挂起，禁止直接重试。

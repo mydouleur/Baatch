@@ -160,15 +160,16 @@ Backend：
 | MTP 层 | 专家 XBF4 + 密集 XBF4 + 路由 BF16 | ~400MB |
 | **合计** | | **≈14GB** |
 
-量化工艺：专家量化全部用 **Tiel 公开 imatrix 加权**（`models/tiel_imatrix.gguf`，4900 万字符代码语料校准，MIT；imatrix 是量化时原料，推理时不在场）。
+量化工艺：**XBF2 routed experts 必须使用 Tiel 公开 imatrix 加权**（`models/tiel_imatrix.gguf`，4900 万字符代码语料校准，MIT；imatrix 是量化时原料，推理时不在场）。XBF4 当前先用对称量化，后续再由质量门决定是否增加校准。
 
-### 10.3 v1 引擎分工（NPU 主力 + CPU 辅助）
+### 10.3 v1 引擎分工（2026-10-24 用户复核定案）
 
-- **NPU（密集路径）**：attn/shexp/embedding/输出头/路由器前向，~1.0GB/token @ 43.6 GB/s ≈ 23ms
-- **CPU 2 大核（专家路径）**：路由专家 XBF2/XBF4 LUT GEMV，~0.39GB/token @ 39 GB/s ≈ 10ms；余量吸收 MTP 草案前向（~1ms×3）与长上下文 KV 读
-- 并行瓶颈 ~23ms → **裸 ~43 tok/s**，×MTP（社区实测接受率 84%，n=3）有效 ~90+ tok/s
-- MTP 走同一套切分：验证前向 = NPU 密集 + CPU 专家（权重只读一遍验证 3 个）；草案头 = 第 41 层，CPU 余量内跑
-- 配平旋钮：输出头 GEMV（258MB）为边界张量，可在 NPU/CPU 间迁移
+- **NPU（默认主路径）**：全部 XBF4 routed experts、共享专家、attention/GDN 投影、MTP 头及输出头。XBF4 不应仅因属于 routed expert 就固定留在 CPU。
+- **CPU（明确适合的部件）**：XBF2 routed experts + imatrix、embedding 查表、router/top-k、采样和 fallback。其他部件只有在 CPU 的功耗与速度综合性价比明显更好时才切到 CPU。
+- **禁止错误分流**：不得把 XBF4 routed experts 与 XBF2 混为一谈按专家统一分配；分发必须同时看 scheme、功耗、带宽和同步成本。
+- **当前实现**：`--npu-xbf4-experts` 已把 XBF4 routed experts 按需转 tile 后分发到 NPU，XBF2 保持 CPU。40 层 80 个 GEMV 全部 PASS，最大 rel_l2=0.00546；独立生成及 prefill/decode 一致，0 flake。量化噪声可能改变近并列路由及后续 greedy token，质量门另行验收。当前容器仍是朴素 absmax，XBF2 的 imatrix 质量版尚未落地。
+- 性能目标暂不写死：先完成正确分工与数值闭环，再测 NPU/CPU 并发带宽、同步成本和整机功耗。43/90+ tok/s 均为早期预算，不是实测结果。
+- MTP 后续沿用同一分工；草案与验证必须复用相同输出语义，并实测接受率和净加速。
 
 ### 10.4 版本边界（用户 2026-10-24 定）
 

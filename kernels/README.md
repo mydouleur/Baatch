@@ -1,29 +1,20 @@
-# kernels/ — XDNA2 AIE kernel（M2' 主战场）
+# kernels/ — XDNA2 AIE kernel
 
-## 路线（2026-10-22 定案）
+## 当前路线
 
-**CI 编译 + 本机实测**：
+- 本机 Windows 全链构建：MLIR 生成 → Peano kernel 编译 → aiecc/xclbinutil → XRT，常见形状约 15 秒，不再依赖 CI 往返。
+- 出货工具链使用上游公开 llvm-aie；AMD RAI 编译器仅用于开发。
+- XBF4 routed experts 与共享/密集权重走 NPU；XBF2 routed experts 走 CPU，不在 NPU 强行实现 2-bit LUT。
 
-- 编译：GitHub Actions（ubuntu + mlir-aie，Apache-2.0 工具链）→ xclbin/elf artifact
-- 实测：本机 Windows + XRT host（M0 探针已验证 elf-flow 加载运行可行）
-- kernel 100% 从自有源码编译，零 AMD 专有 blob——license 最干净路线
+## 当前资产
 
-**已放弃的路线**（2026-10-22，证据见 m0/poc_archive/，工作区留存）：Windows 本地
-ctrlcode txn 逆向合成——能跑通 shim DMA 但计算 tile 写入路径导致过一次系统级宕机
-（内核态驱动被实验控制码挂死），时间成本与稳定性不可接受。
+- `npu_w4_gemv/`：W4A8 int16 VMAC GEMV，M=1 数值已闭合；M>1 prefill 仍在调试。
+- `cpu_xbf3/`：CPU 低位宽 LUT/vnni 参考。
+- `xbf3_gemv/`：早期 XBF3 实验，非当前 v1 主路线。
+- 本地形状库位于 `models/npu/`（不入 git）。
 
-## 开发顺序（docs/M2_ARCH.md §6）
+## 约束
 
-1. `xbf3_gemv` —— XBF3 专家 GEMV 流式 kernel（decode 生命线，目标 ≥55 GB/s 权重流）
-2. `gdn_decode` —— 线性注意力状态更新融合 kernel（纯元素级递推，无 matmul）
-3. `xbf3_gemm_small` —— MTP verify 步小 batch GEMM
-4. `conv1d_k4`、`norm/rope/glue` 小 kernel
-
-每个 kernel 一个子目录：核心 C 源码 + IRON/MLIR 设计脚本 + host 测试。
-本机迭代闭环：`git push` → CI 编译 → `gh run download` 取 artifact → XRT 上机。
-
-## 历史资产（可复用）
-
-M0 探针（probes/bandwidth/）：host XRT 骨架（host_df_bw.cpp）、txn 格式解码器
-（txn_decode.py，格式源自 Apache-2.0 的 XRT 公开源码，无法律问题）、
-实测带宽数据（RESULTS.md）。
+- `mmul<4,4,8>` 变体禁止上机；新 kernel 必须有独立 watchdog。
+- 不使用 insts 热换或多 context 并发提交来规避切换问题。
+- 历史 README/REPORT 保留实验证据；当前分工以 `docs/DESIGN.md` §10 为准。
