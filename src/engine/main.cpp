@@ -284,6 +284,16 @@ int main(int argc, char** argv) { try {
         double o = gdn ? g_prof.gdn_out[l] : g_prof.attn_out[l];
         printf("[prof] layer=%02d proj_ms=%.3f state_ms=%.3f out_ms=%.3f moe_ms=%.3f\n",
                l, p, s, o, g_prof.moe[l]);
+        if (getenv("PROF_STATE")) {
+          if (gdn)
+            printf("[prof-state] layer=%02d gdn_conv_ms=%.3f gdn_recur_ms=%.3f gdn_norm_ms=%.3f\n",
+                   l, g_prof.gdn_conv[l], g_prof.gdn_recur[l], g_prof.gdn_norm[l]);
+          else
+            printf("[prof-state] layer=%02d attn_rope_ms=%.3f attn_cache_ms=%.3f attn_qk_ms=%.3f "
+                   "attn_softmax_ms=%.3f attn_pv_ms=%.3f attn_gate_ms=%.3f\n",
+                   l, g_prof.attn_rope[l], g_prof.attn_cache[l], g_prof.attn_qk[l],
+                   g_prof.attn_softmax[l], g_prof.attn_pv[l], g_prof.attn_gate[l]);
+        }
         if (getenv("PROF_DECODE")) {
           const DirectProfile& mp = moe_profiles[l];
           double routed = g_prof.moe[l] - mp.router - mp.quant - mp.shared - mp.merge;

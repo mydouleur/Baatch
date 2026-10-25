@@ -171,9 +171,104 @@ static int run_case(int R, int C, std::mt19937& rng) {
   return bad;
 }
 
+static int test_attn_qk_prefill(std::mt19937& rng) {
+  constexpr int HD = 256, STRIDE = 512;
+  std::uniform_real_distribution<float> dist(-1.f, 1.f);
+  std::vector<float> q(HD), k(256 * STRIDE), got(256), ref(256);
+  for (float& v : q) v = dist(rng);
+  for (float& v : k) v = dist(rng);
+  for (int len : {1, 2, 3, 4, 5, 63, 64, 65, 255, 256}) {
+    float ref_mx = -1e30f;
+    for (int p = 0; p < len; p++) {
+      float s = 0;
+      for (int i = 0; i < HD; i++) s += q[i] * k[p * STRIDE + i];
+      ref[p] = s / sqrtf((float)HD);
+      ref_mx = std::max(ref_mx, ref[p]);
+    }
+    float got_mx = attn_qk_prefill<HD>(q.data(), k.data(), len, STRIDE, got.data());
+    if (got_mx != ref_mx || memcmp(got.data(), ref.data(), len * sizeof(float)) != 0) {
+      printf("ATTN-QK-PREFILL len=%d FAIL\n", len);
+      return 1;
+    }
+  }
+  printf("ATTN-QK-PREFILL len=1..256: PASS\n");
+  return 0;
+}
+
+static int test_attn_pv_prefill(std::mt19937& rng) {
+  constexpr int HD = 256, STRIDE = 512;
+  std::uniform_real_distribution<float> dist(-1.f, 1.f);
+  std::vector<float> v(256 * STRIDE), scores(256), initial(HD), got(HD), ref(HD);
+  for (float& x : v) x = dist(rng);
+  for (float& x : scores) x = dist(rng);
+  for (float& x : initial) x = dist(rng);
+  float sum = 17.25f;
+  for (int len : {1, 2, 3, 4, 5, 63, 64, 65, 255, 256}) {
+    got = ref = initial;
+    for (int p = 0; p < len; p++) {
+      float w = scores[p] / sum;
+      for (int i = 0; i < HD; i++) ref[i] += w * v[p * STRIDE + i];
+    }
+    attn_pv_prefill<HD>(v.data(), len, STRIDE, scores.data(), sum, got.data());
+    if (memcmp(got.data(), ref.data(), HD * sizeof(float)) != 0) {
+      printf("ATTN-PV-PREFILL len=%d FAIL\n", len);
+      return 1;
+    }
+  }
+  printf("ATTN-PV-PREFILL len=1..256: PASS\n");
+  return 0;
+}
+
+static int test_gdn_recur_prefill(std::mt19937& rng) {
+  constexpr int HD = 128;
+  std::uniform_real_distribution<float> dist(-1.f, 1.f);
+  std::vector<float> initial(HD * HD), got(HD * HD), ref(HD * HD);
+  std::vector<float> k(HD), q(HD), v(HD), sk(HD), d(HD), got_out(HD), ref_out(HD);
+  for (float& x : initial) x = dist(rng);
+  for (float& x : k) x = dist(rng);
+  for (float& x : q) x = dist(rng);
+  for (float& x : v) x = dist(rng);
+  got = ref = initial;
+  float decay_value = 0.9876543f, b = 0.375f;
+  const __m512 decay = _mm512_set1_ps(decay_value);
+  for (int i = 0; i < HD; i++) {
+    float* sr = ref.data() + i * HD;
+    __m512 acc = _mm512_setzero_ps();
+    for (int mm = 0; mm < HD; mm += 16) {
+      __m512 sv = _mm512_mul_ps(_mm512_loadu_ps(sr + mm), decay);
+      _mm512_storeu_ps(sr + mm, sv);
+      acc = _mm512_fmadd_ps(sv, _mm512_loadu_ps(k.data() + mm), acc);
+    }
+    sk[i] = _mm512_reduce_add_ps(acc);
+  }
+  for (int i = 0; i < HD; i++) d[i] = (v[i] - sk[i]) * b;
+  for (int i = 0; i < HD; i++) {
+    float* sr = ref.data() + i * HD;
+    const __m512 vd = _mm512_set1_ps(d[i]);
+    __m512 acc = _mm512_setzero_ps();
+    for (int mm = 0; mm < HD; mm += 16) {
+      __m512 updated = _mm512_fmadd_ps(_mm512_loadu_ps(k.data() + mm), vd, _mm512_loadu_ps(sr + mm));
+      _mm512_storeu_ps(sr + mm, updated);
+      acc = _mm512_fmadd_ps(updated, _mm512_loadu_ps(q.data() + mm), acc);
+    }
+    ref_out[i] = _mm512_reduce_add_ps(acc);
+    got_out[i] = gdn_recur_row_prefill<HD>(got.data() + i * HD, k.data(), q.data(), v[i], b, decay);
+  }
+  if (memcmp(got.data(), ref.data(), got.size() * sizeof(float)) != 0 ||
+      memcmp(got_out.data(), ref_out.data(), got_out.size() * sizeof(float)) != 0) {
+    printf("GDN-RECUR-PREFILL FAIL\n");
+    return 1;
+  }
+  printf("GDN-RECUR-PREFILL state/output: PASS\n");
+  return 0;
+}
+
 int main() {
   std::mt19937 rng(7);
   int bad = 0;
+  bad += test_attn_qk_prefill(rng);
+  bad += test_attn_pv_prefill(rng);
+  bad += test_gdn_recur_prefill(rng);
   bad += run_case<4>(2048, 512, rng);    // down_proj 形状
   bad += run_case<4>(1024, 2048, rng);   // gate_up 形状
   bad += run_case<4>(248320 / 64, 2048, rng);  // lm_head 缩样

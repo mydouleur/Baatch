@@ -9,6 +9,15 @@ struct EngineProfile {
   double attn_proj[Cfg::NLAYERS]{};
   double attn_state[Cfg::NLAYERS]{};
   double attn_out[Cfg::NLAYERS]{};
+  double gdn_conv[Cfg::NLAYERS]{};
+  double gdn_recur[Cfg::NLAYERS]{};
+  double gdn_norm[Cfg::NLAYERS]{};
+  double attn_rope[Cfg::NLAYERS]{};
+  double attn_cache[Cfg::NLAYERS]{};
+  double attn_qk[Cfg::NLAYERS]{};
+  double attn_softmax[Cfg::NLAYERS]{};
+  double attn_pv[Cfg::NLAYERS]{};
+  double attn_gate[Cfg::NLAYERS]{};
   double moe[Cfg::NLAYERS]{};
   double final_norm = 0;
   double lm_head = 0;

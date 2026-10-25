@@ -157,6 +157,14 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   layer0/layer10 三类路由 direct 均 rel_l2=0。固定 256-token M8+16 两轮均值 7954.8ms
   （32.18 tok/s，较 8272.9ms 快 3.84%），MoE 3158.4ms（少 5.21%），0 flake；
   变化 65-token prompt 均值快 4.32%。K2048 多行、gate_up 转置等回退变体未接入。
+- prefill state 使用四项保序优化：attention QK 四 position 交错标量归约（每 position 的 i 顺序不变）、
+  PV 独立通道 AVX-512 乘加（不用 FMA 合并舍入）、RoPE position 级三角函数复用与 KV 预留、
+  GDN 单行 decay/update 融合。QK/PV/GDN 独立 direct reference 逐位 PASS，标准 tests 全 PASS。
+  固定 256-token M8+16 两轮均值 8069.6→7641.4ms（31.72→33.50 tok/s，-5.31%），state
+  1242.8→838.5ms（GDN 629.1→628.5ms、attention 613.7→210.0ms），0 flake；变化 65-token
+  两轮均值快 3.26%，65+64 OUT_IDS 与 HEAD 一致。固定 65 总时长有离群，不宣称三轮均值收益。
+  `PROF=1 PROF_STATE=1` 输出 GDN conv/递推/norm 和 attention RoPE/cache/QK/softmax/PV/gate 分项。
+  PV FMA 与 head-outer 调度分别因数值不一致和性能回退撤回；decode 与其他 prefill 部件不变。
 - M=1 K4096/N2048 已删除无效 ping-pong 并接默认资产：暖态 avg 0.332→0.221ms；
   65-token prefill 49.63→46.21s，输出一致、38193 次调用 0 flake。
 - 默认使用两核单份匿名模型驻留（`BAA_MMAP=1` 回退）、SMT host（`MOE_HOST_SIBLING=0`

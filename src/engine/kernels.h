@@ -229,3 +229,72 @@ static inline void rmsnorm_f32(const float* x, const float* w, int n, float* y,
 static inline float sigmoidf(float x) { return 1.f / (1.f + expf(-x)); }
 static inline float softplusf(float x) { return x > 20.f ? x : log1pf(expf(x)); }
 static inline float siluf(float x) { return x / (1.f + expf(-x)); }
+
+template <int HD>
+static inline float attn_qk_prefill(const float* q, const float* k, int len, int stride,
+                                    float* scores) {
+  float mx = -1e30f;
+  int p = 0;
+  for (; p + 4 <= len; p += 4) {
+    const float* k0 = k + (size_t)p * stride;
+    const float* k1 = k0 + stride;
+    const float* k2 = k1 + stride;
+    const float* k3 = k2 + stride;
+    float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+    for (int i = 0; i < HD; i++) {
+      s0 += q[i] * k0[i];
+      s1 += q[i] * k1[i];
+      s2 += q[i] * k2[i];
+      s3 += q[i] * k3[i];
+    }
+    scores[p] = s0 / sqrtf((float)HD);
+    scores[p + 1] = s1 / sqrtf((float)HD);
+    scores[p + 2] = s2 / sqrtf((float)HD);
+    scores[p + 3] = s3 / sqrtf((float)HD);
+    mx = std::max(mx, scores[p]);
+    mx = std::max(mx, scores[p + 1]);
+    mx = std::max(mx, scores[p + 2]);
+    mx = std::max(mx, scores[p + 3]);
+  }
+  for (; p < len; p++) {
+    const float* kp = k + (size_t)p * stride;
+    float s = 0;
+    for (int i = 0; i < HD; i++) s += q[i] * kp[i];
+    scores[p] = s / sqrtf((float)HD);
+    mx = std::max(mx, scores[p]);
+  }
+  return mx;
+}
+
+template <int HD>
+static inline float gdn_recur_row_prefill(float* sr, const float* k, const float* q,
+                                          float v, float b, __m512 decay) {
+  __m512 acc = _mm512_setzero_ps();
+  for (int mm = 0; mm < HD; mm += 16) {
+    __m512 sv = _mm512_mul_ps(_mm512_loadu_ps(sr + mm), decay);
+    _mm512_storeu_ps(sr + mm, sv);
+    acc = _mm512_fmadd_ps(sv, _mm512_loadu_ps(k + mm), acc);
+  }
+  const __m512 d = _mm512_set1_ps((v - _mm512_reduce_add_ps(acc)) * b);
+  acc = _mm512_setzero_ps();
+  for (int mm = 0; mm < HD; mm += 16) {
+    __m512 updated = _mm512_fmadd_ps(_mm512_loadu_ps(k + mm), d, _mm512_loadu_ps(sr + mm));
+    _mm512_storeu_ps(sr + mm, updated);
+    acc = _mm512_fmadd_ps(updated, _mm512_loadu_ps(q + mm), acc);
+  }
+  return _mm512_reduce_add_ps(acc);
+}
+
+template <int HD>
+static inline void attn_pv_prefill(const float* v, int len, int stride, const float* scores,
+                                   float sum, float* out) {
+  for (int p = 0; p < len; p++) {
+    const float* vp = v + (size_t)p * stride;
+    const __m512 w = _mm512_set1_ps(scores[p] / sum);
+    for (int i = 0; i < HD; i += 16) {
+      __m512 acc = _mm512_loadu_ps(out + i);
+      __m512 delta = _mm512_mul_ps(w, _mm512_loadu_ps(vp + i));
+      _mm512_storeu_ps(out + i, _mm512_add_ps(acc, delta));
+    }
+  }
+}
