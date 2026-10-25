@@ -182,7 +182,7 @@ Backend：
 ### 10.5 Decode roofline 与执行图修正（2026-10-25 实测）
 
 - 当前默认每 token 物理流量约 **1.78GB**：NPU fused projections 0.535GB，CPU routed/shared/out/lm_head 0.891GB，router/小投影约 0.10GB，GDN 状态约 0.252GB。GDN 更新与输出已融合，较此前少读 63MB。
-- 同机长样本探针：CPU2/CPU4 分别约 28/48GB/s，NPU 纯读约 37GB/s；CPU2+NPU 聚合约 68GB/s，CPU4+NPU 约 77GB/s。早期 85–90GB/s 聚合目标未获支持，不得再用于承诺延迟。
+- 同机通用探针曾测得 CPU4+NPU 约 77GB/s。后续两核默认改为单份匿名模型驻留（非 mmap＋额外副本），host 放 SMT sibling，XBF2 合并归约：常驻模型 GEMV 与 NPU 并发实测 **XBF4 约 38+40=78GB/s**，**XBF2 约 20+41=61GB/s**。因此两核 80GB/s 仅在 XBF4 层基本达到，XBF2 仍需新 kernel；不得用 XBF4 数字代表全模型。
 - **18ms 需要约 99GB/s 持续有效带宽**，当前流量下不成立；即使按 77GB/s 且完美聚合也需约 23ms。层内 attention/GDN→out→MoE→下一层是严格依赖，自回归 token 间也无直接流水线，不能直接使用 `max(NPU,CPU)`。
 - 普通 host 多线程不能消除这些依赖。后续 NPU 图应验证 **常驻 context、weight-ahead/activation-later**：提前搬运已知权重，激活就绪后汇合，且不得回退到 insts 热换或多 context 并发。18ms 需要新的数据流与更多流量削减；MTP 是另一条降低每接受 token 成本的路径，不与物理单步延迟混淆。
 

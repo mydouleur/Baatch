@@ -1,4 +1,4 @@
-// baa.h — .baa 容器 loader（mmap 零拷贝）+ 张量访问（BAA_FORMAT.md v0.1）
+// baa.h — .baa 容器 loader（默认匿名驻留，可选 mmap）+ 张量访问
 #pragma once
 #include <cstdint>
 #include <cstdio>
@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 #include <stdexcept>
+#include <algorithm>
+#include <cstdlib>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -34,6 +36,7 @@ struct Baa {
   const uint8_t* base = nullptr;
   size_t file_size = 0;
   std::string meta_json;
+  std::vector<uint8_t> anonymous;
 
 #ifdef _WIN32
   HANDLE hFile = INVALID_HANDLE_VALUE;
@@ -46,10 +49,24 @@ struct Baa {
                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) throw std::runtime_error("open fail: " + path);
     LARGE_INTEGER sz; GetFileSizeEx(hFile, &sz); file_size = (size_t)sz.QuadPart;
-    hMap = CreateFileMappingA(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
-    if (!hMap) throw std::runtime_error("CreateFileMapping fail");
-    base = (const uint8_t*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
-    if (!base) throw std::runtime_error("MapViewOfFile fail");
+    if (!getenv("BAA_MMAP")) {
+      anonymous.resize(file_size);
+      size_t offset = 0;
+      while (offset < file_size) {
+        DWORD chunk = (DWORD)std::min<size_t>(file_size - offset, 64 * 1024 * 1024);
+        DWORD read = 0;
+        if (!ReadFile(hFile, anonymous.data() + offset, chunk, &read, nullptr) || !read)
+          throw std::runtime_error("anonymous model read fail");
+        offset += read;
+      }
+      CloseHandle(hFile); hFile = INVALID_HANDLE_VALUE;
+      base = anonymous.data();
+    } else {
+      hMap = CreateFileMappingA(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+      if (!hMap) throw std::runtime_error("CreateFileMapping fail");
+      base = (const uint8_t*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+      if (!base) throw std::runtime_error("MapViewOfFile fail");
+    }
 #else
     throw std::runtime_error("only Windows mmap implemented");
 #endif

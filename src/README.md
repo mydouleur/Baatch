@@ -129,10 +129,10 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   fused `_m` 仍有 wn 车道错误，稳定版本逐行调用 M1 kernel。
 - M=1 K4096/N2048 已删除无效 ping-pong 并接默认资产：暖态 avg 0.332→0.221ms；
   65-token prefill 49.63→46.21s，输出一致、38193 次调用 0 flake。
-- MoE scheduled 已设默认，`MOE_SCHEDULED=0` 回退；预平铺 XBF4 首次转换为 128 通道、
-  每块 66B 的行权重并缓存。decode lm_head 默认两核 CPU，`CPU_LM_HEAD=0` 回退；
-  attention 默认补零复用 N12288，decode 约 75–100ms/token（10–13.3 tok/s），65-token prefill
-  约 6–6.3s，NPU 0 flake。`bench_moe` 另有 direct/scheduled、固定/随机 top8
+- 默认使用两核单份匿名模型驻留（`BAA_MMAP=1` 回退）、SMT host（`MOE_HOST_SIBLING=0`
+  回退）、66B 行缓存、XBF2 合并归约与 CPU lm_head。decode 约 53–70ms/token（14–19 tok/s），
+  65-token prefill 5.87s，NPU 0 flake。常驻并发 XBF4 约 78GB/s、XBF2 约 61GB/s。
+  `bench_moe` 另有 direct/scheduled、固定/随机 top8
   与 GEMV/同步/量化分项；4/8 routed 线程无稳定收益，保持两线程。
 - CPU 激活量化、整数求和、偶奇/模4拆分已 AVX-512 化，单测与层对拍 PASS。
   GDN 状态更新与输出已融合，少读约 63MB/token；prefill 后 decode 实测最低约 67ms。

@@ -199,7 +199,7 @@ struct MoeScheduler {
   std::exception_ptr error;
 
   MoeScheduler(Model& model, const MoeLayerPlan* plan = nullptr) : m(model), p(plan) {
-    SetThreadAffinityMask(GetCurrentThread(), 1ull << 0);
+    SetThreadAffinityMask(GetCurrentThread(), env_flag_default("MOE_HOST_SIBLING") ? 1ull << 1 : 1ull << 0);
     worker = std::thread([this] {
       SetThreadAffinityMask(GetCurrentThread(), 1ull << 0);
       std::unique_lock<std::mutex> lock(mu);

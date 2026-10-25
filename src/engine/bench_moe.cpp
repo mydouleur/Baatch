@@ -109,6 +109,9 @@ int main(int argc, char** argv) { try {
     return max_rel < 0.02 ? 0 : 3;
   }
 
+  if (const char* gate = getenv("BENCH_GATE")) {
+    while (GetFileAttributesA(gate) == INVALID_FILE_ATTRIBUTES) Sleep(1);
+  }
   npu.reset_stats();
   for (int i = 0; i < inputs; i++) {
     auto t0 = std::chrono::steady_clock::now();
