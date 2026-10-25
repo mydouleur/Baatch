@@ -26,6 +26,8 @@ namespace Cfg {
   constexpr int VOCAB = 248320;
 }  // namespace Cfg
 
+#include "profile.h"
+
 static void cpu_mv_pretiled(const BaaTensor& t, const float* x, float* y);
 
 struct GdnState {
@@ -42,6 +44,11 @@ struct AttnState {  // 一个全注意力层的 KV cache
 
 static inline std::string LN(int l, const char* suffix) {
   return "layers." + std::to_string(l) + "." + suffix;
+}
+
+static inline bool env_flag(const char* name) {
+  const char* value = getenv(name);
+  return value && *value && *value != '0';
 }
 
 struct Model {
@@ -65,6 +72,8 @@ struct Model {
   void mv_named(const BaaTensor& w, const std::string& name, const float* x, float* y) {
     int R = (int)w.shape[w.ndim - 2], C = (int)w.shape[w.ndim - 1];
     bool expert_npu = npu && npu->xbf4_experts && name.find(".experts.") != std::string::npos;
+    if (name.find(".experts.gate_up_proj.") != std::string::npos && env_flag("CPU_EXPERT_GATE_UP")) expert_npu = false;
+    if (name.find(".experts.down_proj.") != std::string::npos && env_flag("CPU_EXPERT_DOWN")) expert_npu = false;
     if (w.scheme == 3 && ((w.flags & 1) || expert_npu) && npu && npu->ok) {
       if (npu->gemv(w, x, y)) return;
       if (w.flags & 1) {
@@ -167,6 +176,7 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
   if (getenv("TRACE")) fprintf(stderr, "gdn %d start\n", l);
   using namespace Cfg;
   std::vector<float> xn(H), qkv(QKV_DIM), z(VAL_DIM), beta(VH), alpha(VH);
+  auto pt = prof_now();
   m.nrm(m.T(LN(l, "input_layernorm.weight")), xin, H, xn.data(), true);
   if (getenv("TRACE")) fprintf(stderr, "gdn %d norm done\n", l);
   const auto& qw = m.T(LN(l, "linear_attn.in_proj_qkv.weight"));
@@ -187,6 +197,7 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
     if (getenv("TRACE")) fprintf(stderr, "gdn %d a done\n", l);
   }
   if (getenv("TRACE")) fprintf(stderr, "gdn %d projections done\n", l);
+  prof_add(g_prof.gdn_proj[l], pt); pt = prof_now();
   const float* dt_b = m.T(LN(l, "linear_attn.dt_bias")).f32();
   const float* a_log = m.T(LN(l, "linear_attn.A_log")).f32();
   float g[VH];
@@ -273,7 +284,9 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
       og[j * HD + i] = p[i] * inv * nw[i] * siluf(z[j * HD + i]);
   }
   std::vector<float> dec(H);
+  prof_add(g_prof.gdn_state[l], pt); pt = prof_now();
   m.mv(m.T(LN(l, "linear_attn.out_proj.weight")), og.data(), dec.data());
+  prof_add(g_prof.gdn_out[l], pt);
   for (int i = 0; i < H; i++) xout[i] = xin[i] + dec[i];
   if (getenv("TRACE")) fprintf(stderr, "gdn %d done\n", l);
 }
@@ -282,21 +295,30 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
 static void attn_decode(Model& m, int l, AttnState& st, int pos, const float* xin, float* xout) {
   using namespace Cfg;
   std::vector<float> xn(H), qg(QPROJ), kk(KVH * AHD), vv(KVH * AHD);
+  auto pt = prof_now();
   m.nrm(m.T(LN(l, "input_layernorm.weight")), xin, H, xn.data(), true);
   const auto& qw = m.T(LN(l, "self_attn.q_proj.weight"));
   const auto& kw = m.T(LN(l, "self_attn.k_proj.weight"));
   const auto& vw = m.T(LN(l, "self_attn.v_proj.weight"));
-  bool kv_cpu = !((kw.flags & 1) || (vw.flags & 1));
+  bool kv_cpu = env_flag("CPU_KV") || !((kw.flags & 1) || (vw.flags & 1));
+  auto run_kv = [&] {
+    if (env_flag("CPU_KV")) {
+      cpu_mv_pretiled(kw, xn.data(), kk.data());
+      cpu_mv_pretiled(vw, xn.data(), vv.data());
+    } else {
+      m.mv(kw, xn.data(), kk.data());
+      m.mv(vw, xn.data(), vv.data());
+    }
+  };
   NpuBackend::Job qjob;
   if (kv_cpu && m.npu_submit(qw, xn.data(), qg.data(), qjob)) {
-    m.mv(kw, xn.data(), kk.data());
-    m.mv(vw, xn.data(), vv.data());
+    run_kv();
     m.npu_finish(qw, xn.data(), qg.data(), qjob, "q_proj");
   } else {
     m.mv(qw, xn.data(), qg.data());
-    m.mv(kw, xn.data(), kk.data());
-    m.mv(vw, xn.data(), vv.data());
+    run_kv();
   }
+  prof_add(g_prof.attn_proj[l], pt); pt = prof_now();
   const float* qnw = m.T(LN(l, "self_attn.q_norm.weight")).f32();
   const float* knw = m.T(LN(l, "self_attn.k_norm.weight")).f32();
   // 逐头 RMSNorm（Q 用前半 256，gate 后半）
@@ -359,7 +381,9 @@ static void attn_decode(Model& m, int l, AttnState& st, int pos, const float* xi
     for (int i = 0; i < AHD; i++) attn[h * AHD + i] *= sigmoidf(gate[i]);
   }
   std::vector<float> dec(H);
+  prof_add(g_prof.attn_state[l], pt); pt = prof_now();
   m.mv(m.T(LN(l, "self_attn.o_proj.weight")), attn.data(), dec.data());
+  prof_add(g_prof.attn_out[l], pt);
   for (int i = 0; i < H; i++) xout[i] = xin[i] + dec[i];
 }
 
@@ -386,6 +410,17 @@ static void moe(Model& m, int l, const float* xin, float* xout) {
     static bool dbg = getenv("MOE_DBG") != nullptr;
     if (dbg) { fprintf(stderr, "  top8 L%d:", l); for (int t = 0; t < TOPK; t++) fprintf(stderr, " %d(%.3f)", top[t], tw[t]); fprintf(stderr, "\n"); }
   }
+  std::vector<float> sg(MI), su(MI), sh(H), sgate(1);
+  m.mv(m.T(LN(l, "mlp.shared_expert.gate_proj.weight")), xn.data(), sg.data());
+  m.mv(m.T(LN(l, "mlp.shared_expert.up_proj.weight")), xn.data(), su.data());
+  for (int i = 0; i < MI; i++) sg[i] = siluf(sg[i]) * su[i];
+  const auto& sdw = m.T(LN(l, "mlp.shared_expert.down_proj.weight"));
+  NpuBackend::Job sdjob;
+  bool sd_async = !env_flag("CPU_SHARED_DOWN") && (!m.npu || !m.npu->xbf4_experts) &&
+                  m.npu_submit(sdw, sg.data(), sh.data(), sdjob);
+  if (!sd_async) m.mv(sdw, sg.data(), sh.data());
+  m.mv(m.T(LN(l, "mlp.shared_expert_gate.weight")), xn.data(), sgate.data());
+
   auto prof0 = std::chrono::steady_clock::now();
   // v1 容器：专家按粒度独立目录项（layers.N.mlp.experts.gate_up_proj.{e}），
   // scheme 逐专家读取——禁止按层假设统一位宽（docs v1 定案）
@@ -403,20 +438,7 @@ static void moe(Model& m, int l, const float* xin, float* xout) {
     for (int i = 0; i < H; i++) acc[i] += tw[t] * dov[i];
   }
   auto prof1 = std::chrono::steady_clock::now();
-  // 共享专家（dense SwiGLU + sigmoid 门）
-  std::vector<float> sg(MI), su(MI), sh(H), sgate(1);
-  m.mv(m.T(LN(l, "mlp.shared_expert.gate_proj.weight")), xn.data(), sg.data());
-  m.mv(m.T(LN(l, "mlp.shared_expert.up_proj.weight")), xn.data(), su.data());
-  for (int i = 0; i < MI; i++) sg[i] = siluf(sg[i]) * su[i];
-  const auto& sdw = m.T(LN(l, "mlp.shared_expert.down_proj.weight"));
-  NpuBackend::Job sdjob;
-  if (m.npu_submit(sdw, sg.data(), sh.data(), sdjob)) {
-    m.mv(m.T(LN(l, "mlp.shared_expert_gate.weight")), xn.data(), sgate.data());
-    m.npu_finish(sdw, sg.data(), sh.data(), sdjob, "shared_expert.down_proj");
-  } else {
-    m.mv(sdw, sg.data(), sh.data());
-    m.mv(m.T(LN(l, "mlp.shared_expert_gate.weight")), xn.data(), sgate.data());
-  }
+  if (sd_async) m.npu_finish(sdw, sg.data(), sh.data(), sdjob, "shared_expert.down_proj");
   static bool prof = getenv("MOE_PROF") != nullptr;
   if (prof) {
     auto prof2 = std::chrono::steady_clock::now();

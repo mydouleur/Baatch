@@ -142,6 +142,9 @@ int main(int argc, char** argv) { try {
         size_t c = ids_str.find(',', p);
         ids.push_back(atoi(ids_str.substr(p, c == std::string::npos ? ids_str.size() : c - p).c_str()));
         if (c == std::string::npos) break; p = c + 1; } }
+    g_prof.enabled = getenv("PROF") != nullptr;
+    g_prof.reset();
+    npu.reset_stats();
     const BaaTensor& emb = m.T("embed_tokens");
     const BaaTensor& lmh = m.T("lm_head.weight");
     const BaaTensor& fnorm = m.T("norm");
@@ -167,7 +170,9 @@ int main(int argc, char** argv) { try {
       for (int l = 0; l < Cfg::NLAYERS; l++) {
         if (m.is_gdn(l)) gdn_decode(m, l, gst[l], dx.data(), dx2.data());
         else attn_decode(m, l, ast[l], pos, dx.data(), dx2.data());
+        auto mt = prof_now();
         moe(m, l, dx2.data(), dx.data());
+        prof_add(g_prof.moe[l], mt);
       }
       m.nrm(fnorm, dx.data(), Cfg::H, dx.data(), true);
       m.mv(lmh, dx.data(), logits.data());
@@ -185,7 +190,11 @@ int main(int argc, char** argv) { try {
       for (int l = 0; l < Cfg::NLAYERS; l++) {
         if (m.is_gdn(l)) gdn_prefill(m, l, gst[l], x.data(), T, x2.data());
         else attn_prefill(m, l, ast[l], 0, x.data(), T, x2.data());
-        for (int t = 0; t < T; t++) moe(m, l, x2.data() + (size_t)t * Cfg::H, x.data() + (size_t)t * Cfg::H);
+        for (int t = 0; t < T; t++) {
+          auto mt = prof_now();
+          moe(m, l, x2.data() + (size_t)t * Cfg::H, x.data() + (size_t)t * Cfg::H);
+          prof_add(g_prof.moe[l], mt);
+        }
       }
       float* last = x.data() + (size_t)(T - 1) * Cfg::H;
       m.nrm(fnorm, last, Cfg::H, last, true);
@@ -213,6 +222,25 @@ int main(int argc, char** argv) { try {
     printf("OUT_IDS:");
     for (int t : out_ids) printf("%d,", t);
     printf("\n");
+    if (g_prof.enabled) {
+      double tp = 0, ts = 0, to = 0, tm = 0;
+      size_t kv_bytes = 0, gdn_bytes = 0;
+      for (int l = 0; l < Cfg::NLAYERS; l++) {
+        bool gdn = m.is_gdn(l);
+        double p = gdn ? g_prof.gdn_proj[l] : g_prof.attn_proj[l];
+        double s = gdn ? g_prof.gdn_state[l] : g_prof.attn_state[l];
+        double o = gdn ? g_prof.gdn_out[l] : g_prof.attn_out[l];
+        printf("[prof] layer=%02d proj_ms=%.3f state_ms=%.3f out_ms=%.3f moe_ms=%.3f\n",
+               l, p, s, o, g_prof.moe[l]);
+        tp += p; ts += s; to += o; tm += g_prof.moe[l];
+        kv_bytes += (ast[l].k.size() + ast[l].v.size()) * sizeof(float);
+        gdn_bytes += (gst[l].ssm.size() + gst[l].conv.size()) * sizeof(float);
+      }
+      printf("[prof] totals proj_ms=%.3f state_ms=%.3f out_ms=%.3f moe_ms=%.3f "
+             "kv_MB=%.3f gdn_MB=%.3f\n", tp, ts, to, tm,
+             kv_bytes / 1e6, gdn_bytes / 1e6);
+      npu.print_stats();
+    }
     return 0;
   }
   fprintf(stderr, "nothing to do\n");
