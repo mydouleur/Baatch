@@ -14,8 +14,8 @@
 - `.baa` 为厂商中立容器，目录保存逻辑 shape，flags 描述物理布局。
 - **XBF2/XBF4 routed experts 默认走 CPU（2026-10-25 实测修订）；XBF4 NPU 仅留实验对照**。
 - **XBF2 routed experts + imatrix → CPU**。
-- 共享专家、attention/GDN 投影、MTP 头和 lm_head → NPU。
-- embedding 查表、router/top-k、采样和 fallback → CPU；其他部件只有在 CPU 综合性价比明显更好时才切到 CPU。
+- 共享专家、attention/GDN decode 投影和 lm_head → CPU；prefill 末尾 lm_head → NPU，MTP 头后续按实测分发。
+- embedding 查表、router/top-k、采样和 fallback → CPU；`NPU_DECODE_PROJ=1` 保留 decode 旧 NPU 投影对照，其他部件只有在综合性价比明显更好时才切换。
 - 当前 absmax 是开发版，XBF2 imatrix 和 PPL 质量门尚未完成。
 
 ## 3. 后端与调度
@@ -24,8 +24,8 @@
 serve/CLI（后续）
   → prefill / decode / MTP 调度
     → 模型数学与状态管理
-      → XDNA2：XBF4 experts、共享专家、密集投影、lm_head
-      → CPU：XBF2 experts、embedding、router、采样、fallback
+      → XDNA2：prefill 末尾 lm_head、实验对照与后续按实测分发部件
+      → CPU：decode 密集投影、XBF2/XBF4 experts、embedding、router、采样、fallback
 ```
 
 - 后端负责 buffer、布局转换、异步 submit/wait、能力查询和缓存上限。

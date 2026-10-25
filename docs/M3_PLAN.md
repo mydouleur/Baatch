@@ -3,9 +3,9 @@
 ## 当前定案
 
 - XBF2/XBF4 routed experts 默认走 CPU；XBF4 的 NPU 路径仅留实验对照。
-- 共享专家与 routed experts 默认走 CPU；attention/GDN 大投影 decode 与 MTP 头走 NPU；lm_head 在 decode 默认走两核 CPU，在 prefill 末尾走 NPU。
-- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；prefill 大投影与 out_proj 也默认两核 CPU，`NPU_PROJ=1`/`NPU_OUT_PROJ=1` 保留对照。65-token CPU projection 3321ms、NPU 3824ms。
-- GDN qkv+z、attention q+k+v 默认共同复用 N12288；`NPU_WIDE_ATTN=0` 回退，`CPU_LM_HEAD=0` 回退 NPU lm_head。最终变化 prompt 65+64：prefill 3449ms，decode 平均 65.49ms、中位 62.6ms；256-token prefill 11011ms，NPU 0 flake。
+- 共享专家、routed experts 与 attention/GDN 大投影 decode 默认走两核 CPU；decode 投影复现 NPU 逐块 BF16 语义，`NPU_DECODE_PROJ=1` 保留旧 NPU 对照。lm_head 在 decode 默认走两核 CPU，在 prefill 末尾走 NPU。
+- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；prefill 大投影与 out_proj 也默认两核 CPU，`NPU_PROJ=1`/`NPU_OUT_PROJ=1` 保留对照。
+- 最终同二进制 65+64 A/B：旧 NPU decode 平均 65.37ms、中位 62.0ms、p95 74.10ms；默认 CPU decode 平均 53.82ms、中位 52.9ms、p95 57.18ms，64 个 OUT_IDS 一致，NPU 对照 2561 次调用 0 flake。25ms/token 尚未达到。
 
 ## 已完成
 
@@ -22,8 +22,8 @@
 
 1. **XBF4 routed experts NPU 验收：已完成**
    路由近并列时量化噪声会改变后续 greedy token；不把与 CPU 逐 token 相同作为验收条件，质量门留待后续。
-2. **NPU 执行图与无效带宽优化**
-   N12288 复用已消除 decode 主投影切换，GDN 更新/输出融合少读 63MB/token。当前约 1.78GB/token，CPU4+NPU 实测聚合约 77GB/s，18ms 需要约 99GB/s 且受逐层依赖限制。下一步验证常驻 context、weight-ahead/activation-later；不得回退 insts 热换或多 context。
+2. **decode 单 token 分项优化**
+   N12288 旧 NPU 路径实测投影约 31.27ms/token，默认已改为数值一致的 CPU 路径；65+64 同二进制 A/B 从平均 65.37ms 降至 53.82ms。继续依据 `PROF=1 PROF_DECODE=1` 的逐层数据优化 MoE、out_proj、GDN 与 lm_head；不得回退 insts 热换、多 context 或已挂起的 weight-ahead 双静态入口协议。
 3. **prefill M>1 与性能功耗基线**
    K2048 主 fused Shape 的 M2 standalone 已闭合且有 kernel 收益；K4096/N2048 仍确定性 ERT timeout。成对引擎路径出现块损坏，hidden rel_l2=0.528，接入已移除，默认保持 M1。继续按逐层成本优化 MoE/GEMM 与 decode，并建立功耗对照。
 4. **MTP**

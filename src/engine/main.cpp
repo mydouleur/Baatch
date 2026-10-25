@@ -170,6 +170,7 @@ int main(int argc, char** argv) { try {
       }
     };
     std::vector<float> dx(Cfg::H), dx2(Cfg::H);
+    std::vector<DirectProfile> moe_profiles(Cfg::NLAYERS);
     auto decode_one = [&](int tok, int pos, double& ms) {
       embed(tok, dx.data());
       auto t0 = std::chrono::steady_clock::now();
@@ -177,16 +178,19 @@ int main(int argc, char** argv) { try {
         if (m.is_gdn(l)) gdn_decode(m, l, gst[l], dx.data(), dx2.data());
         else attn_decode(m, l, ast[l], pos, dx.data(), dx2.data());
         auto mt = prof_now();
-        if (moe_scheduler) moe_scheduler->run(*moe_plans[l], dx2.data(), dx.data());
+        DirectProfile* mp = g_prof.enabled ? &moe_profiles[l] : nullptr;
+        if (moe_scheduler) moe_scheduler->run(*moe_plans[l], dx2.data(), dx.data(), mp);
         else moe(m, l, dx2.data(), dx.data());
         prof_add(g_prof.moe[l], mt);
       }
       auto lh = prof_now();
       m.nrm(fnorm, dx.data(), Cfg::H, dx.data(), true);
+      prof_add(g_prof.final_norm, lh); lh = prof_now();
       if (env_flag_default("CPU_LM_HEAD")) cpu_mv_pretiled_fast(lmh, dx.data(), logits.data(), &m.pool);
       else m.mv(lmh, dx.data(), logits.data());
+      prof_add(g_prof.lm_head, lh); lh = prof_now();
       int result = (int)(std::max_element(logits.begin(), logits.end()) - logits.begin());
-      prof_add(g_prof.lm_head, lh);
+      prof_add(g_prof.sample, lh);
       ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
       return result;
     };
@@ -225,6 +229,7 @@ int main(int argc, char** argv) { try {
       next = (int)(std::max_element(logits.begin(), logits.end()) - logits.begin());
       double ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
       printf("prefill %d tokens (%.1f ms) -> %d\n", T, ms, next);
+      if (g_prof.enabled && getenv("PROF_DECODE")) { g_prof.reset(); npu.reset_stats(); }
       pos = T;
       for (int step = 0; step < n_gen; step++) {
         int tok = next;
@@ -255,12 +260,21 @@ int main(int argc, char** argv) { try {
         double o = gdn ? g_prof.gdn_out[l] : g_prof.attn_out[l];
         printf("[prof] layer=%02d proj_ms=%.3f state_ms=%.3f out_ms=%.3f moe_ms=%.3f\n",
                l, p, s, o, g_prof.moe[l]);
+        if (getenv("PROF_DECODE")) {
+          const DirectProfile& mp = moe_profiles[l];
+          double routed = g_prof.moe[l] - mp.router - mp.quant - mp.shared - mp.merge;
+          printf("[prof-moe] layer=%02d router_ms=%.3f quant_ms=%.3f shared_ms=%.3f "
+                 "routed_ms=%.3f gemv_ms=%.3f pool_sync_ms=%.3f expert_quant_ms=%.3f "
+                 "activation_ms=%.3f merge_ms=%.3f\n", l, mp.router, mp.quant, mp.shared,
+                 routed, mp.gemv, mp.pool_sync, mp.expert_quant, mp.activation, mp.merge);
+        }
         tp += p; ts += s; to += o; tm += g_prof.moe[l];
         kv_bytes += (ast[l].k.size() + ast[l].v.size()) * sizeof(float);
         gdn_bytes += (gst[l].ssm.size() + gst[l].conv.size()) * sizeof(float);
       }
-      printf("[prof] totals proj_ms=%.3f state_ms=%.3f out_ms=%.3f moe_ms=%.3f lm_head_ms=%.3f "
-             "kv_MB=%.3f gdn_MB=%.3f\n", tp, ts, to, tm, g_prof.lm_head,
+      printf("[prof] totals proj_ms=%.3f state_ms=%.3f out_ms=%.3f moe_ms=%.3f "
+             "final_norm_ms=%.3f lm_head_ms=%.3f sample_ms=%.3f kv_MB=%.3f gdn_MB=%.3f\n",
+             tp, ts, to, tm, g_prof.final_norm, g_prof.lm_head, g_prof.sample,
              kv_bytes / 1e6, gdn_bytes / 1e6);
       npu.print_stats();
     }

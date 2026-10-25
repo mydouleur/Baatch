@@ -10,7 +10,9 @@ struct EngineProfile {
   double attn_state[Cfg::NLAYERS]{};
   double attn_out[Cfg::NLAYERS]{};
   double moe[Cfg::NLAYERS]{};
+  double final_norm = 0;
   double lm_head = 0;
+  double sample = 0;
 
   void reset() {
     bool keep = enabled;

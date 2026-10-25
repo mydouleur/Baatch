@@ -30,7 +30,8 @@ namespace Cfg {
 
 static void cpu_mv_pretiled(const BaaTensor& t, const float* x, float* y);
 static void cpu_prepare_pretiled(const BaaTensor& t);
-static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y, Pool* pool = nullptr);
+static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y,
+                                 Pool* pool = nullptr, bool npu_semantics = false);
 
 struct GdnState {
   std::vector<float> conv;   // (CONV_K-1) × QKV_DIM
@@ -224,7 +225,8 @@ static void cpu_prepare_pretiled(const BaaTensor& t) {
   }
 }
 
-static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y, Pool* pool) {
+static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y,
+                                 Pool* pool, bool npu_semantics) {
   int N = (int)t.shape[0], K = (int)t.shape[1];
   cpu_prepare_pretiled(t);
   std::vector<int8_t> q(K), xe(K / 2), xo(K / 2);
@@ -234,15 +236,20 @@ static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y, P
   std::vector<int> tile_sums(K / 128);
   for (int b = 0; b < K / 128; b++)
     for (int i = 0; i < 128; i++) tile_sums[b] += q[b * 128 + i];
+  auto run_rows = [&](const uint8_t* rows, int count, float* out) {
+    if (npu_semantics)
+      gemv_xbf4_128_rows_npu(rows, count, K, xe.data(), xo.data(), tile_sums.data(), sx, out);
+    else
+      gemv_xbf4_128_rows(rows, count, K, xe.data(), xo.data(), tile_sums.data(), sx, out);
+  };
   if (pool) {
     size_t row_bytes = (size_t)(K / 128) * 66;
     pool->run_all([&](int id) {
       int begin = N * id / pool->workers, end = N * (id + 1) / pool->workers;
-      gemv_xbf4_128_rows(t.cpu_rows.data() + (size_t)begin * row_bytes, end - begin, K,
-                         xe.data(), xo.data(), tile_sums.data(), sx, y + begin);
+      run_rows(t.cpu_rows.data() + (size_t)begin * row_bytes, end - begin, y + begin);
     });
   } else {
-    gemv_xbf4_128_rows(t.cpu_rows.data(), N, K, xe.data(), xo.data(), tile_sums.data(), sx, y);
+    run_rows(t.cpu_rows.data(), N, y);
   }
 }
 
@@ -259,7 +266,12 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
   const BaaTensor* fused_weights[] = {&qw, &zw};
   float* fused_outputs[] = {qkv.data(), z.data()};
   NpuBackend::Job qjob;
-  if (m.npu && m.npu->ok && m.npu->gemv_fused(fused_weights, 2, xn.data(), fused_outputs)) {
+  if (!env_flag("NPU_DECODE_PROJ")) {
+    cpu_mv_pretiled_fast(qw, xn.data(), qkv.data(), &m.pool, true);
+    cpu_mv_pretiled_fast(zw, xn.data(), z.data(), &m.pool, true);
+    m.mv(m.T(LN(l, "linear_attn.in_proj_b.weight")), xn.data(), beta.data());
+    m.mv(m.T(LN(l, "linear_attn.in_proj_a.weight")), xn.data(), alpha.data());
+  } else if (m.npu && m.npu->ok && m.npu->gemv_fused(fused_weights, 2, xn.data(), fused_outputs)) {
     m.mv(m.T(LN(l, "linear_attn.in_proj_b.weight")), xn.data(), beta.data());
     m.mv(m.T(LN(l, "linear_attn.in_proj_a.weight")), xn.data(), alpha.data());
   } else if (m.npu_submit(qw, xn.data(), qkv.data(), qjob)) {
@@ -395,7 +407,11 @@ static void attn_decode(Model& m, int l, AttnState& st, int pos, const float* xi
   const BaaTensor* fused_weights[] = {&qw, &kw, &vw};
   float* fused_outputs[] = {qg.data(), kk.data(), vv.data()};
   NpuBackend::Job qjob;
-  if (!env_flag("CPU_KV") && m.npu && m.npu->ok &&
+  if (!env_flag("NPU_DECODE_PROJ")) {
+    cpu_mv_pretiled_fast(qw, xn.data(), qg.data(), &m.pool, true);
+    cpu_mv_pretiled_fast(kw, xn.data(), kk.data(), &m.pool, true);
+    cpu_mv_pretiled_fast(vw, xn.data(), vv.data(), &m.pool, true);
+  } else if (!env_flag("CPU_KV") && m.npu && m.npu->ok &&
       m.npu->gemv_fused(fused_weights, 3, xn.data(), fused_outputs,
                         env_flag_default("NPU_WIDE_ATTN") ? 12288 : 0)) {
   } else if (kv_cpu && m.npu_submit(qw, xn.data(), qg.data(), qjob)) {
@@ -422,13 +438,17 @@ static void attn_decode(Model& m, int l, AttnState& st, int pos, const float* xi
     for (int i = 0; i < AHD; i++) p[i] = p[i] * inv * (1.f + knw[i]);
   }
   // RoPE：前 ROPE_DIM 维，theta 1e7，interleaved（mrope_interleaved=true）
+  float rope_cos[ROPE_DIM / 2], rope_sin[ROPE_DIM / 2];
+  for (int i = 0; i < ROPE_DIM / 2; i++) {
+    float freq = 1.f / powf(ROPE_THETA, 2.f * i / ROPE_DIM);
+    float ang = pos * freq;
+    rope_cos[i] = cosf(ang); rope_sin[i] = sinf(ang);
+  }
   auto rope = [&](float* vec, int nheads) {
     for (int h = 0; h < nheads; h++) {
       float* p = vec + h * AHD;
       for (int i = 0; i < ROPE_DIM / 2; i++) {
-        float freq = 1.f / powf(ROPE_THETA, 2.f * i / ROPE_DIM);
-        float ang = pos * freq;
-        float ca = cosf(ang), sa = sinf(ang);
+        float ca = rope_cos[i], sa = rope_sin[i];
         float x0 = p[2 * i], x1 = p[2 * i + 1];
         p[2 * i] = x0 * ca - x1 * sa;
         p[2 * i + 1] = x0 * sa + x1 * ca;
@@ -442,31 +462,33 @@ static void attn_decode(Model& m, int l, AttnState& st, int pos, const float* xi
   st.v.insert(st.v.end(), vv.begin(), vv.end());
   st.len++;
   // 注意力：16 q 头 → kv 头 h/8
-  std::vector<float> attn(QH * AHD, 0.f);
+  std::vector<float> attn(QH * AHD, 0.f), sc0(st.len), sc1(st.len);
   float kq_scale = 1.f / sqrtf((float)AHD);
-  for (int h = 0; h < QH; h++) {
-    const float* qh = qg.data() + h * 2 * AHD;
-    int kvh = h / (QH / KVH);
-    std::vector<float> sc(st.len);
-    float mx = -1e30f;
-    for (int p = 0; p < st.len; p++) {
-      const float* kp = st.k.data() + (size_t)p * KVH * AHD + kvh * AHD;
-      float s = 0;
-      for (int i = 0; i < AHD; i++) s += qh[i] * kp[i];
-      sc[p] = s * kq_scale;
-      mx = std::max(mx, sc[p]);
+  auto run_heads = [&](int begin, int end, std::vector<float>& sc) {
+    for (int h = begin; h < end; h++) {
+      const float* qh = qg.data() + h * 2 * AHD;
+      int kvh = h / (QH / KVH);
+      float mx = -1e30f;
+      for (int p = 0; p < st.len; p++) {
+        const float* kp = st.k.data() + (size_t)p * KVH * AHD + kvh * AHD;
+        float s = 0;
+        for (int i = 0; i < AHD; i++) s += qh[i] * kp[i];
+        sc[p] = s * kq_scale;
+        mx = std::max(mx, sc[p]);
+      }
+      float sum = 0;
+      for (int p = 0; p < st.len; p++) { sc[p] = expf(sc[p] - mx); sum += sc[p]; }
+      for (int p = 0; p < st.len; p++) {
+        const float* vp = st.v.data() + (size_t)p * KVH * AHD + kvh * AHD;
+        float w = sc[p] / sum;
+        for (int i = 0; i < AHD; i++) attn[h * AHD + i] += w * vp[i];
+      }
+      // output gate：out × sigmoid(gate)
+      const float* gate = qg.data() + h * 2 * AHD + AHD;
+      for (int i = 0; i < AHD; i++) attn[h * AHD + i] *= sigmoidf(gate[i]);
     }
-    float sum = 0;
-    for (int p = 0; p < st.len; p++) { sc[p] = expf(sc[p] - mx); sum += sc[p]; }
-    for (int p = 0; p < st.len; p++) {
-      const float* vp = st.v.data() + (size_t)p * KVH * AHD + kvh * AHD;
-      float w = sc[p] / sum;
-      for (int i = 0; i < AHD; i++) attn[h * AHD + i] += w * vp[i];
-    }
-    // output gate：out × sigmoid(gate)
-    const float* gate = qg.data() + h * 2 * AHD + AHD;
-    for (int i = 0; i < AHD; i++) attn[h * AHD + i] *= sigmoidf(gate[i]);
-  }
+  };
+  m.pool.run([&](int id) { run_heads(id * QH / 2, (id + 1) * QH / 2, id ? sc1 : sc0); });
   std::vector<float> dec(H);
   prof_add(g_prof.attn_state[l], pt); pt = prof_now();
   m.mv_out(m.T(LN(l, "self_attn.o_proj.weight")), attn.data(), dec.data());

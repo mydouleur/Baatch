@@ -102,6 +102,28 @@ static int run_case(int R, int C, std::mt19937& rng) {
         return 1;
       }
     }
+    std::vector<float> y_npu(R);
+    gemv_xbf4_128_rows_npu(w128.data(), R, C, xe.data(), xo.data(), sums128.data(), sx, y_npu.data());
+    for (int r = 0; r < R; r++) {
+      float ref_npu = 0.f;
+      for (int b = 0; b < C / 128; b++) {
+        int isum = -8 * sums128[b];
+        for (int i = 0; i < 128; i++) {
+          int byte = dat[(r * sb_per_row + b / 2) * 128 + (b % 2) * 64 + i / 2];
+          int field = (byte >> ((i % 2) * 4)) & 15;
+          isum += field * xq[b * 128 + i];
+        }
+        float acc_bf = bf16_to_f32(f32_to_bf16((float)isum));
+        const uint8_t* wb = w128.data() + ((size_t)r * (C / 128) + b) * 66;
+        float scale = bf16_to_f32(wb[0] | (wb[1] << 8));
+        ref_npu = bf16_to_f32(f32_to_bf16(ref_npu + acc_bf * scale));
+      }
+      ref_npu *= sx;
+      if (y_npu[r] != ref_npu) {
+        printf("XBF4-128-NPU row=%d FAIL got=%.9g ref=%.9g\n", r, y_npu[r], ref_npu);
+        return 1;
+      }
+    }
   }
   int bad = 0; float max_rel = 0;
   for (int r = 0; r < R; r++) {

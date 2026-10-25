@@ -4,7 +4,7 @@
 
 ## 当前设计
 
-- **共享专家与 XBF2/XBF4 routed experts 默认走 CPU；attention/GDN 大投影 decode 与 MTP 头走 NPU，prefill 大投影和 out_proj 默认两核 CPU；lm_head decode 走 CPU、prefill 末尾走 NPU。`NPU_PROJ=1`/`NPU_OUT_PROJ=1` 保留对照**。
+- **共享专家、routed experts 与 attention/GDN 大投影 decode 默认走两核 CPU；decode 投影复现 NPU 的逐块 BF16 数值语义，`NPU_DECODE_PROJ=1` 保留旧 NPU 对照。prefill 大投影和 out_proj 默认两核 CPU；lm_head decode 走 CPU、prefill 末尾走 NPU。`NPU_PROJ=1`/`NPU_OUT_PROJ=1` 保留 prefill 对照**。
 - **XBF2 + imatrix routed experts → CPU**。
 - **embedding 查表、router/top-k、采样和 fallback → CPU**；其他部件只有在 CPU 综合性价比明显更好时才切到 CPU。
 - `.baa` 容器保存逻辑形状与布局 flags，量化格式与后端可独立演进。

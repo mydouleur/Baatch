@@ -1,11 +1,11 @@
 # src/ — Baatch 引擎本体（M2' 起）
 
-## 当前分工（2026-10-25 实测修订）
+## 当前分工（2026-10-26 实测修订）
 
 - XBF2/XBF4 routed experts 默认走 CPU；`--npu-xbf4-experts` 仅作实验对照。
-- 共享专家与 routed experts 默认走 CPU；attention/GDN 大投影 decode 与 MTP 头走 NPU；lm_head 在 decode 默认走两核 CPU，在 prefill 末尾走 NPU。
-- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；prefill 大投影与 out_proj 也默认两核 CPU，`NPU_PROJ=1`/`NPU_OUT_PROJ=1` 保留对照。65-token CPU projection 3321ms、NPU 3824ms；第 0 层 projection rel_l2=0.00438。
-- GDN qkv+z、attention q+k+v 默认共同复用 N12288；decode 暖态约 75–100ms/token，65-token prefill 约 6–6.3s。
+- 共享专家、routed experts 与 attention/GDN 大投影 decode 默认走两核 CPU；decode 投影复现 NPU 逐块 BF16 语义，`NPU_DECODE_PROJ=1` 保留旧 NPU 对照。lm_head 在 decode 默认走两核 CPU，在 prefill 末尾走 NPU。
+- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；prefill 大投影与 out_proj 也默认两核 CPU，`NPU_PROJ=1`/`NPU_OUT_PROJ=1` 保留对照。
+- 同二进制 65+64 A/B：旧 NPU decode 平均 65.37ms、中位 62.0ms；默认 CPU decode 平均 53.82ms、中位 52.9ms，64 个 OUT_IDS 一致。25ms/token 尚未达到。
 
 规划结构（见 docs/M2_ARCH.md §3）：
 
@@ -141,6 +141,11 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   attention 16 头两核化使 256-token state 总计减少 0.461s，65+16 IDs 一致、0 flake。
   `bench_moe` 另有 direct/scheduled、固定/随机 top8
   与 GEMV/同步/量化分项；4/8 routed 线程无稳定收益，保持两线程。
+- 2026-10-26 decode 投影默认改到两核 CPU，逐 128 块复现 NPU BF16 最近偶数转换与累加，
+  `NPU_DECODE_PROJ=1` 可回退旧 NPU 对照；普通 FP32 CPU 投影会改变 OUT_IDS，未采用。
+  同二进制 65+64 平均 65.37→53.82ms、中位 62.0→52.9ms，64 个 IDs 一致，NPU 对照 0 flake。
+  decode attention 16 头两核化并保持每头标量归约；`PROF=1 PROF_DECODE=1` 输出 decode
+  独立逐层、router/shared/routed、NPU submit/wait/sync 与 lm_head 分项。25ms/token 尚未达到。
 - CPU 激活量化、整数求和、偶奇/模4拆分已 AVX-512 化，单测与层对拍 PASS。
   GDN 状态更新与输出已融合，少读约 63MB/token；prefill 后 decode 实测最低约 67ms。
   当前约 1.78GB/token，CPU4+NPU 并发探针约 77GB/s；18ms 需约 99GB/s 且受逐层依赖限制。

@@ -52,7 +52,7 @@ struct NpuBackend {
   size_t bo_budget = 3ull * 1024 * 1024 * 1024;
   uint64_t cache_clock = 0;
   long bo_hits = 0, bo_misses = 0, shape_switches = 0;
-  double pack_ms = 0, submit_ms = 0, wait_ms = 0, sync_ms = 0;
+  double pack_ms = 0, submit_ms = 0, wait_ms = 0, run_wait_ms = 0, output_ms = 0, sync_ms = 0;
   uint64_t physical_weight_bytes = 0;
   Shape* last_shape = nullptr;
 
@@ -62,7 +62,7 @@ struct NpuBackend {
   }
   void reset_stats() {
     runs = flakes = bo_hits = bo_misses = shape_switches = 0;
-    pack_ms = submit_ms = wait_ms = sync_ms = 0;
+    pack_ms = submit_ms = wait_ms = run_wait_ms = output_ms = sync_ms = 0;
     physical_weight_bytes = 0; last_shape = nullptr;
     for (auto& [key, shape] : shapes) {
       shape->runs = shape->switches = 0;
@@ -72,10 +72,11 @@ struct NpuBackend {
   }
   void print_stats() const {
     printf("[npu-stats] runs=%ld flakes=%ld switches=%ld bo_hit=%ld bo_miss=%ld "
-           "pack_ms=%.3f submit_ms=%.3f wait_ms=%.3f sync_ms=%.3f weight_MB=%.3f "
-           "expert_cache_MB=%.3f pinned_MB=%.3f budget_MB=%.3f\n",
+           "pack_ms=%.3f submit_ms=%.3f wait_ms=%.3f run_wait_ms=%.3f output_ms=%.3f "
+           "sync_ms=%.3f weight_MB=%.3f expert_cache_MB=%.3f pinned_MB=%.3f budget_MB=%.3f\n",
            runs, flakes, shape_switches, bo_hits, bo_misses, pack_ms, submit_ms, wait_ms,
-           sync_ms, physical_weight_bytes / 1e6, cached_bytes / 1e6, pinned_bytes / 1e6,
+           run_wait_ms, output_ms, sync_ms, physical_weight_bytes / 1e6,
+           cached_bytes / 1e6, pinned_bytes / 1e6,
            bo_budget / 1e6);
     for (const auto& [key, shape] : shapes)
       printf("[npu-shape] k=%d n=%d runs=%ld switches=%ld submit_ms=%.3f wait_ms=%.3f weight_MB=%.3f\n",
@@ -363,8 +364,10 @@ struct NpuBackend {
     auto t0 = std::chrono::steady_clock::now();
     Shape& s = *j.shape;
     for (int att = 0; att < 4; att++) {
+      auto rt = std::chrono::steady_clock::now();
       try { j.run->wait2(); }
       catch (const std::exception& e) {
+        run_wait_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - rt).count() * 1e3;
         fprintf(stderr, "[npu] run 超时/挂起：%s — 不重试（看门狗语义）\n", e.what());
         runs++; s.runs++;
         ok = false; busy = false;
@@ -373,6 +376,8 @@ struct NpuBackend {
         s.wait_ms += elapsed;
         return false;
       }
+      run_wait_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - rt).count() * 1e3;
+      auto ot = std::chrono::steady_clock::now();
       runs++; s.runs++;
       sync_bo(s.bc, XCL_BO_SYNC_BO_FROM_DEVICE);
       const uint16_t* c = (const uint16_t*)s.bc.map();
@@ -380,6 +385,7 @@ struct NpuBackend {
       for (int i = 0; i < j.N; i++) if (c[i] != 0) { allzero = false; break; }
       if (!allzero) {
         for (int i = 0; i < j.N; i++) j.y[i] = bf16_to_f32(c[i]) * j.sx;
+        output_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - ot).count() * 1e3;
         busy = false;
         double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
         wait_ms += elapsed;
