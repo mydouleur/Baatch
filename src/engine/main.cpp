@@ -201,6 +201,8 @@ int main(int argc, char** argv) { try {
       int T = ids.size();
       std::vector<float> x((size_t)T * Cfg::H), x2((size_t)T * Cfg::H);
       MoePrefillWorkspace prefill_workspace(T);
+      MoePrefillStats prefill_stats;
+      bool collect_prefill_stats = env_flag("MOE_PREFILL_STATS");
       std::exception_ptr warm_error;
       std::thread warmer([&] {
         SetThreadAffinityMask(GetCurrentThread(), 1ull << 0);
@@ -220,6 +222,25 @@ int main(int argc, char** argv) { try {
         auto mt = prof_now();
         moe_prefill(m, *moe_plans[l], prefill_workspace, x2.data(), x.data());
         prof_add(g_prof.moe[l], mt);
+        if (collect_prefill_stats) {
+          const MoePrefillStats& s = prefill_workspace.stats;
+          prefill_stats.tokens += s.tokens;
+          prefill_stats.blocks += s.blocks;
+          prefill_stats.assignments += s.assignments;
+          prefill_stats.expert_runs += s.expert_runs;
+          prefill_stats.direct_weight_bytes += s.direct_weight_bytes;
+          prefill_stats.packed_weight_bytes += s.packed_weight_bytes;
+        }
+      }
+      if (collect_prefill_stats) {
+        double reuse = (double)prefill_stats.assignments / prefill_stats.expert_runs;
+        double saved = 1.0 - (double)prefill_stats.packed_weight_bytes / prefill_stats.direct_weight_bytes;
+        printf("[moe-prefill] blocks=%llu assignments=%llu expert_runs=%llu rows_per_run=%.4f "
+               "direct_weight_MB=%.3f packed_weight_MB=%.3f weight_saved=%.2f%%\n",
+               (unsigned long long)prefill_stats.blocks, (unsigned long long)prefill_stats.assignments,
+               (unsigned long long)prefill_stats.expert_runs, reuse,
+               prefill_stats.direct_weight_bytes / 1e6, prefill_stats.packed_weight_bytes / 1e6,
+               saved * 100);
       }
       warmer.join();
       if (warm_error) std::rethrow_exception(warm_error);

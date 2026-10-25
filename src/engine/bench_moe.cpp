@@ -52,7 +52,7 @@ static void direct_moe_npu(Model& m, const MoeLayerPlan& p, DirectMoeWorkspace& 
 
 int main(int argc, char** argv) { try {
   std::string baa = "D:/xdna_llm/models/ornith35_xbf24_dense.baa";
-  std::string npu_dir = "models/npu", mode = "current", top8 = "model";
+  std::string npu_dir = "models/npu", mode = "current", top8 = "model", blocks_arg = "8";
   int layer = 0, inputs = 8, rounds = 4, prefill_tokens = 0;
   bool cpu_ref = false;
   for (int i = 1; i < argc; i++) {
@@ -65,6 +65,7 @@ int main(int argc, char** argv) { try {
     else if (s == "--rounds") rounds = atoi(argv[++i]);
     else if (s == "--top8") top8 = argv[++i];
     else if (s == "--prefill-tokens") prefill_tokens = atoi(argv[++i]);
+    else if (s == "--blocks") blocks_arg = argv[++i];
     else if (s == "--cpu-ref") cpu_ref = true;
     else throw std::runtime_error("unknown argument: " + s);
   }
@@ -140,6 +141,14 @@ int main(int argc, char** argv) { try {
       }
     }
     const int* top_override = top8 == "model" ? nullptr : forced.data();
+    std::vector<int> blocks;
+    for (size_t at = 0; at <= blocks_arg.size();) {
+      size_t comma = blocks_arg.find(',', at);
+      blocks.push_back(atoi(blocks_arg.substr(at, comma == std::string::npos ?
+          blocks_arg.size() - at : comma - at).c_str()));
+      if (comma == std::string::npos) break;
+      at = comma + 1;
+    }
     std::vector<float> out((size_t)T * Cfg::H), legacy((size_t)T * Cfg::H);
     auto direct_start = std::chrono::steady_clock::now();
     for (int tok = 0; tok < T; tok++)
@@ -148,30 +157,49 @@ int main(int argc, char** argv) { try {
     double direct_ms = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - direct_start).count() * 1e3;
     MoePrefillWorkspace prefill_workspace(T);
-    double total = 0, best = 1e30, legacy_total = 0;
+    double legacy_total = 0;
     for (int r = 0; r < rounds; r++) {
       auto start = std::chrono::steady_clock::now();
       moe_prefill_legacy(m, *plan, prefill_workspace, x.data(), legacy.data(), top_override);
       legacy_total += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() * 1e3;
-      start = std::chrono::steady_clock::now();
-      moe_prefill8(m, *plan, prefill_workspace, x.data(), out.data(), top_override);
-      double ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() * 1e3;
-      total += ms; best = std::min(best, ms);
     }
-    double num = 0, den = 0, max_rel = 0;
-    for (size_t i = 0; i < out.size(); i++) {
-      double d = out[i] - reference[i];
-      num += d * d; den += (double)reference[i] * reference[i];
-      max_rel = std::max(max_rel, fabs(d) / (fabs(reference[i]) + 1e-4));
+    printf("PREFILL_REFERENCE layer=%d tokens=%d top8=%s rounds=%d direct_ms=%.3f legacy_mean_ms=%.3f legacy_hash=%016llx\n",
+           layer, T, top8.c_str(), rounds, direct_ms, legacy_total / rounds,
+           (unsigned long long)hash_output(legacy));
+    int failed = 0;
+    for (int block : blocks) {
+      double total = 0, best = 1e30;
+      for (int r = 0; r < rounds; r++) {
+        auto start = std::chrono::steady_clock::now();
+        moe_prefill_blocks(m, *plan, prefill_workspace, x.data(), out.data(), block, top_override);
+        double ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() * 1e3;
+        total += ms; best = std::min(best, ms);
+      }
+      double num = 0, den = 0, max_rel = 0;
+      for (size_t i = 0; i < out.size(); i++) {
+        double d = out[i] - reference[i];
+        num += d * d; den += (double)reference[i] * reference[i];
+        max_rel = std::max(max_rel, fabs(d) / (fabs(reference[i]) + 1e-4));
+      }
+      uint64_t direct_hash = hash_output(reference), batch_hash = hash_output(out);
+      const MoePrefillStats& stats = prefill_workspace.stats;
+      double reuse = stats.expert_runs ? (double)stats.assignments / stats.expert_runs : 0;
+      double saved = stats.direct_weight_bytes ?
+          1.0 - (double)stats.packed_weight_bytes / stats.direct_weight_bytes : 0;
+      printf("PREFILL_MOE layer=%d tokens=%d top8=%s block=%d rounds=%d mean_ms=%.3f min_ms=%.3f rel_l2=%.6g max_rel=%.6g\n",
+             layer, T, top8.c_str(), block, rounds, total / rounds, best,
+             sqrt(num / (den + 1e-12)), max_rel);
+      printf("PREFILL_REUSE block=%d blocks=%llu assignments=%llu expert_runs=%llu rows_per_run=%.4f direct_weight_MB=%.3f packed_weight_MB=%.3f weight_saved=%.2f%% slot_out_MB=%.3f\n",
+             block, (unsigned long long)stats.blocks, (unsigned long long)stats.assignments,
+             (unsigned long long)stats.expert_runs, reuse, stats.direct_weight_bytes / 1e6,
+             stats.packed_weight_bytes / 1e6, saved * 100,
+             (double)block * Cfg::TOPK * Cfg::H * sizeof(float) / 1e6);
+      printf("PREFILL_HASH block=%d direct=%016llx batch=%016llx %s\n",
+             block, (unsigned long long)direct_hash, (unsigned long long)batch_hash,
+             direct_hash == batch_hash ? "PASS" : "FAIL");
+      failed |= max_rel >= 0.02 || direct_hash != batch_hash;
     }
-    uint64_t direct_hash = hash_output(reference), batch_hash = hash_output(out), legacy_hash = hash_output(legacy);
-    printf("PREFILL_MOE layer=%d tokens=%d top8=%s rounds=%d direct_ms=%.3f legacy_mean_ms=%.3f batch_mean_ms=%.3f batch_min_ms=%.3f rel_l2=%.6g max_rel=%.6g\n",
-           layer, T, top8.c_str(), rounds, direct_ms, legacy_total / rounds, total / rounds, best,
-           sqrt(num / (den + 1e-12)), max_rel);
-    printf("PREFILL_HASH direct=%016llx batch=%016llx legacy=%016llx %s\n",
-           (unsigned long long)direct_hash, (unsigned long long)batch_hash, (unsigned long long)legacy_hash,
-           direct_hash == batch_hash ? "PASS" : "FAIL");
-    return max_rel < 0.02 && direct_hash == batch_hash ? 0 : 3;
+    return failed ? 3 : 0;
   }
 
   if (const char* gate = getenv("BENCH_GATE")) {

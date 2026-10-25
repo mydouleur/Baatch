@@ -1,6 +1,11 @@
 #pragma once
 #include "moe_scheduler.h"
 
+struct MoePrefillStats {
+  uint64_t tokens = 0, blocks = 0, assignments = 0, expert_runs = 0;
+  uint64_t direct_weight_bytes = 0, packed_weight_bytes = 0;
+};
+
 struct MoePrefillWorkspace {
   int tokens;
   std::vector<float> xn, logits, sx, sums, sg, su, sh, sgate;
@@ -9,6 +14,7 @@ struct MoePrefillWorkspace {
   std::vector<float> weights;
   std::array<std::vector<int>, Cfg::NE> expert_tokens;
   std::array<std::vector<int>, Cfg::NE> expert_slots;
+  MoePrefillStats stats;
 
   MoePrefillWorkspace(int T) : tokens(T) {
     xn.resize((size_t)T * Cfg::H); logits.resize((size_t)T * Cfg::NE);
@@ -34,6 +40,9 @@ static void moe_prefill_run(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace
                             const float* xin, float* xout, int T, bool ordered_merge,
                             const int* top_override) {
   using namespace Cfg;
+  w.stats.tokens += T;
+  w.stats.blocks++;
+  w.stats.assignments += (uint64_t)T * TOPK;
   std::fill(w.acc.begin(), w.acc.begin() + (size_t)T * H, 0.f);
   for (auto& tokens : w.expert_tokens) tokens.clear();
   for (auto& slots : w.expert_slots) slots.clear();
@@ -121,6 +130,10 @@ static void moe_prefill_run(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace
       xq_split2(w.hq.data() + (size_t)j * MI, MI, w.hq4.data() + (size_t)j * MI);
     }
     const BaaTensor& down = *p.down[e];
+    uint64_t weight_bytes = gu.size + down.size;
+    w.stats.expert_runs++;
+    w.stats.direct_weight_bytes += (uint64_t)M * weight_bytes;
+    w.stats.packed_weight_bytes += weight_bytes;
     R = (int)down.shape[0]; half = (R / 2 + 15) & ~15;
     if (down.scheme == 3) {
       m.pool.run([&](int id) {
@@ -171,20 +184,34 @@ static void moe_prefill_run(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace
 
 static void moe_prefill_legacy(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace& w,
                                const float* xin, float* xout, const int* top_override = nullptr) {
+  w.stats = {};
   moe_prefill_run(m, p, w, xin, xout, w.tokens, false, top_override);
 }
 
-static void moe_prefill8(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace& w,
-                         const float* xin, float* xout, const int* top_override = nullptr) {
-  for (int base = 0; base < w.tokens; base += 8) {
-    int count = std::min(8, w.tokens - base);
+static void moe_prefill_blocks(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace& w,
+                               const float* xin, float* xout, int block,
+                               const int* top_override = nullptr) {
+  if (block != 8 && block != 16 && block != 32 && block != 64)
+    throw std::runtime_error("MOE_PREFILL_BLOCK must be 8, 16, 32 or 64");
+  size_t slot_size = (size_t)std::min(w.tokens, block) * Cfg::TOPK * Cfg::H;
+  if (w.slot_out.size() < slot_size) w.slot_out.resize(slot_size);
+  w.stats = {};
+  for (int base = 0; base < w.tokens; base += block) {
+    int count = std::min(block, w.tokens - base);
     moe_prefill_run(m, p, w, xin + (size_t)base * Cfg::H, xout + (size_t)base * Cfg::H,
                     count, true, top_override ? top_override + (size_t)base * Cfg::TOPK : nullptr);
   }
 }
 
+static void moe_prefill8(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace& w,
+                         const float* xin, float* xout, const int* top_override = nullptr) {
+  moe_prefill_blocks(m, p, w, xin, xout, 8, top_override);
+}
+
 static void moe_prefill(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace& w,
                         const float* xin, float* xout) {
-  if (env_flag("MOE_PREFILL8")) moe_prefill8(m, p, w, xin, xout);
+  const char* configured = getenv("MOE_PREFILL_BLOCK");
+  if (configured && *configured) moe_prefill_blocks(m, p, w, xin, xout, atoi(configured));
+  else if (env_flag("MOE_PREFILL8")) moe_prefill8(m, p, w, xin, xout);
   else moe_prefill_legacy(m, p, w, xin, xout);
 }
