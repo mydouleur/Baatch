@@ -133,10 +133,10 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
 - M=1 K4096/N2048 已删除无效 ping-pong 并接默认资产：暖态 avg 0.332→0.221ms；
   65-token prefill 49.63→46.21s，输出一致、38193 次调用 0 flake。
 - 默认使用两核单份匿名模型驻留（`BAA_MMAP=1` 回退）、SMT host（`MOE_HOST_SIBLING=0`
-  回退）、66B 行缓存、XBF2 合并归约与 CPU lm_head。decode 约 53–70ms/token（14–19 tok/s），
-  65-token prefill 5.87s，NPU 0 flake。常驻并发 XBF4 约 78GB/s、XBF2 约 61GB/s。
-  prefill 后台预热 decode out/lm_head 行缓存，GDN 32 头两核并行；真实 65+64 的 decode
-  中位 57.90ms、平均 58.71ms、p95 61.9ms，TTFT 5.88s；匿名模型启动读写约 12s。
+  回退）、66B 行缓存、XBF2 合并归约与 CPU lm_head。最终变化 prompt 65+64：prefill
+  3449ms（18.84 tok/s），decode 平均 65.49ms、中位 62.6ms，2561 次 NPU 调用 0 flake；
+  256-token prefill 11011ms（23.25 tok/s）。常驻并发 XBF4 约 78GB/s、XBF2 约 61GB/s。
+  prefill 后台预热 decode out/lm_head 行缓存，GDN 32 头两核并行；匿名模型启动读写约 12s。
   router 已两核化，NPU 每 Shape 复用 `xrt::run`。prefill `PROF=1` 覆盖 proj/state/out/MoE；
   attention 16 头两核化使 256-token state 总计减少 0.461s，65+16 IDs 一致、0 flake。
   `bench_moe` 另有 direct/scheduled、固定/随机 top8
