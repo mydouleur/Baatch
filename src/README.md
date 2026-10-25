@@ -211,3 +211,11 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
 - 2026-10-26 `bench_moe --mode npu --cpu-ref` 增加同调度的 M=1 XBF4 routed 对照；
   两种矩阵均复用稳定 K2048/N2048。layer0 暖态 NPU 3.341/3.620ms、CPU direct 0.336ms，
   rel_l2≤0.000158、暖态 1280 次调用 0 flake。无收益，未接完整 decode。
+- 最终 HEAD `f8b27b8` 干净重建验收：标准 tests `OVERALL PASS`。默认 CPU 固定 65+64
+  两轮 decode 平均 48.023/48.397ms、中位 47.90/48.35ms、nearest-rank p95 49.00/49.60ms、
+  20.823/20.662 tok/s，OUT_IDS 一致且 0 flake。`NPU_M8=1 MOE_PREFILL_BLOCK=16` 仍为
+  非默认实验：固定 65/256 与变化 65 prefill 为 2825.2/7427.2/2794.5ms
+  （23.01/34.47/23.26 tok/s），0 flake；固定 65+64 与旧 NPU M1+MoE16 IDs 一致，
+  但不同于默认 CPU，不宣称跨数值语义一致。最终稳定 M1 smoke 的 8 个 CPU reference
+  全 PASS、640 次 NPU 调用 0 flake，无 timeout/reset。25ms decode、长 prompt 数千 tok/s、
+  MTP、旧 M2 根因、高频 Runner 重建零块及 imatrix/PPL/任务质量均未闭合。
