@@ -128,7 +128,8 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
 - M>1 采用打包 A/C FIFO + kernel 内权重 tile 复用，A FIFO 深度 8 修复跨组覆盖；
   M2 两行共享一次 W4 解包和 B 加载。K2048/N12288 随机与独立行 PASS，1000 次均值
   0.678ms vs M1×2 1.012ms；N10240 0.619ms vs 0.760ms。K4096/N2048 仍确定性
-  ERT timeout；通用 M4 数值 FAIL。成对引擎接入仍无端到端净收益，默认保持 M1。
+  ERT timeout；通用 M4 数值 FAIL。`NPU_M2=1` 实验路径默认关闭，完整 64-token
+  chunk 两轮平均约快 4.7%；65-token 因尾 M1/BO 开销仍无收益，默认保持 M1。
 - M=1 K4096/N2048 已删除无效 ping-pong 并接默认资产：暖态 avg 0.332→0.221ms；
   65-token prefill 49.63→46.21s，输出一致、38193 次调用 0 flake。
 - 默认使用两核单份匿名模型驻留（`BAA_MMAP=1` 回退）、SMT host（`MOE_HOST_SIBLING=0`

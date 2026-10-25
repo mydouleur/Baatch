@@ -25,7 +25,7 @@
 2. **NPU 执行图与无效带宽优化**
    N12288 复用已消除 decode 主投影切换，GDN 更新/输出融合少读 63MB/token。当前约 1.78GB/token，CPU4+NPU 实测聚合约 77GB/s，18ms 需要约 99GB/s 且受逐层依赖限制。下一步验证常驻 context、weight-ahead/activation-later；不得回退 insts 热换或多 context。
 3. **prefill M>1 与性能功耗基线**
-   K2048 主 fused Shape 的 M2 已闭合且有 kernel 收益；K4096/N2048 仍确定性 ERT timeout。成对引擎实验无稳定端到端净收益，默认保持 M1。继续按逐层成本优化 MoE/GEMM 与 decode，并建立功耗对照。
+   K2048 主 fused Shape 的 M2 已闭合且有 kernel 收益；K4096/N2048 仍确定性 ERT timeout。`NPU_M2=1` 默认关闭，完整 64-token chunk 约快 4.7%，65-token 无净收益。继续按逐层成本优化 MoE/GEMM 与 decode，并建立功耗对照。
 4. **MTP**
    实现 draft/verify/accept 与状态回滚，实测接受率和净加速。
 5. **量化质量**

@@ -34,7 +34,7 @@ struct NpuBackend {
     std::unique_ptr<xrt::run> run;
     xrt::bo bi, ba, bc;
     unsigned instr_words;
-    int K, N;
+    int K, N, M;
     long runs = 0, switches = 0;
     double submit_ms = 0, wait_ms = 0;
     uint64_t weight_bytes = 0;
@@ -42,12 +42,12 @@ struct NpuBackend {
     std::map<std::vector<const void*>, Weight> fused_cache;
   };
   xrt::device dev{0};
-  std::map<uint64_t, std::shared_ptr<Shape>> shapes;   // key = K<<32|N
+  std::map<uint64_t, std::shared_ptr<Shape>> shapes;   // key = M<<56|K<<32|N
   bool ok = false;
   bool xbf4_experts = false;
   long runs = 0, flakes = 0;
   std::string dir;
-  std::vector<int16_t> aq;
+  std::vector<int16_t> aq, aq2;
   size_t cached_bytes = 0, pinned_bytes = 0;
   size_t bo_budget = 3ull * 1024 * 1024 * 1024;
   uint64_t cache_clock = 0;
@@ -78,8 +78,8 @@ struct NpuBackend {
            sync_ms, physical_weight_bytes / 1e6, cached_bytes / 1e6, pinned_bytes / 1e6,
            bo_budget / 1e6);
     for (const auto& [key, shape] : shapes)
-      printf("[npu-shape] k=%d n=%d runs=%ld switches=%ld submit_ms=%.3f wait_ms=%.3f weight_MB=%.3f\n",
-             shape->K, shape->N, shape->runs, shape->switches,
+      printf("[npu-shape] k=%d n=%d m=%d runs=%ld switches=%ld submit_ms=%.3f wait_ms=%.3f weight_MB=%.3f\n",
+             shape->K, shape->N, shape->M, shape->runs, shape->switches,
              shape->submit_ms, shape->wait_ms, shape->weight_bytes / 1e6);
   }
   template <typename Direction>
@@ -89,12 +89,13 @@ struct NpuBackend {
     sync_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
   }
 
-  Shape& shape_for(int K, int N) {
-    uint64_t key = (uint64_t)K << 32 | (unsigned)N;
+  Shape& shape_for(int K, int N, int M = 1) {
+    uint64_t key = (uint64_t)M << 56 | (uint64_t)K << 32 | (unsigned)N;
     auto it = shapes.find(key);
     if (it != shapes.end()) return *it->second;
     auto s = std::make_shared<Shape>();
     std::string base = dir + "/k" + std::to_string(K) + "n" + std::to_string(N);
+    if (M == 2) base += "m2fix";
     std::ifstream f(base + ".insts.bin", std::ios::binary);
     if (!f) throw std::runtime_error("npu shape missing: " + base);
     f.seekg(0, std::ios::end); size_t n = f.tellg(); f.seekg(0);
@@ -106,11 +107,11 @@ struct NpuBackend {
     s->bi = xrt::bo(dev, inst.size(), XCL_BO_FLAGS_CACHEABLE, s->kernel.group_id(1));
     memcpy(s->bi.map(), inst.data(), inst.size());
     sync_bo(s->bi, XCL_BO_SYNC_BO_TO_DEVICE);
-    s->ba = xrt::bo(dev, K * 2, XRT_BO_FLAGS_HOST_ONLY, s->kernel.group_id(3));
-    s->bc = xrt::bo(dev, N * 2, XRT_BO_FLAGS_HOST_ONLY, s->kernel.group_id(5));
-    s->instr_words = inst.size() / 4; s->K = K; s->N = N;
+    s->ba = xrt::bo(dev, M * K * 2, XRT_BO_FLAGS_HOST_ONLY, s->kernel.group_id(3));
+    s->bc = xrt::bo(dev, M * N * 2, XRT_BO_FLAGS_HOST_ONLY, s->kernel.group_id(5));
+    s->instr_words = inst.size() / 4; s->K = K; s->N = N; s->M = M;
     shapes[key] = s;
-    fprintf(stderr, "[npu] shape k%d n%d ready\n", K, N);
+    fprintf(stderr, "[npu] shape k%d n%d m%d ready\n", K, N, M);
     return *s;
   }
 
@@ -250,12 +251,15 @@ struct NpuBackend {
     float sx;
     int N, physical_N;
     xrt::run* run;
+    float* y2 = nullptr;
+    float sx2 = 0.f;
+    int M = 1;
   };
   bool busy = false;
 
   void launch(Job& j) {
     Shape& s = *j.shape;
-    memset(s.bc.map(), 0, j.physical_N * 2);
+    memset(s.bc.map(), 0, j.M * j.physical_N * 2);
     sync_bo(s.bc, XCL_BO_SYNC_BO_TO_DEVICE);
     if (!s.run) {
       s.run = std::make_unique<xrt::run>(s.kernel);
@@ -359,6 +363,63 @@ struct NpuBackend {
     return true;
   }
 
+  bool gemv_fused_pair(const BaaTensor* const* tensors, int count,
+                       const float* x0, const float* x1,
+                       float* const* ys0, float* const* ys1, int min_physical_N = 0) {
+    if (!ok || busy || count < 2) return false;
+    auto t0 = std::chrono::steady_clock::now();
+    int K = (int)tensors[0]->shape[1], physical_N = 0;
+    size_t weight_bytes = 0;
+    std::vector<int> physical_ns(count);
+    for (int i = 0; i < count; i++) {
+      int N = (int)tensors[i]->shape[0];
+      if (tensors[i]->flags != 1 || tensors[i]->shape[1] != K) return false;
+      physical_ns[i] = N <= 1024 ? 1024 : (N + 2047) & ~2047;
+      physical_N += physical_ns[i];
+      weight_bytes += (size_t)(K / 128) * (physical_ns[i] / 64) * 4352;
+    }
+    min_physical_N = (min_physical_N + 2047) & ~2047;
+    if (physical_N < min_physical_N) {
+      int padding = min_physical_N - physical_N;
+      physical_ns.push_back(padding);
+      physical_N += padding;
+      weight_bytes += (size_t)(K / 128) * (padding / 64) * 4352;
+    }
+    if (K != 2048 || (physical_N != 10240 && physical_N != 12288)) return false;
+    Shape& s = shape_for(K, physical_N, 2);
+    if (last_shape && last_shape != &s) { shape_switches++; s.switches++; }
+    last_shape = &s;
+    physical_weight_bytes += weight_bytes;
+    s.weight_bytes += weight_bytes;
+    xrt::bo& bb = bo_fused(s, tensors, count, physical_ns);
+    aq.resize(K); aq2.resize(K);
+    float sx0 = quant_xq16(x0, K, aq.data());
+    float sx1 = quant_xq16(x1, K, aq2.data());
+    int16_t* a = static_cast<int16_t*>(s.ba.map());
+    for (int tile = 0; tile < K / 128; tile++) {
+      memcpy(a + (size_t)(tile * 2) * 128, aq.data() + tile * 128, 128 * 2);
+      memcpy(a + (size_t)(tile * 2 + 1) * 128, aq2.data() + tile * 128, 128 * 2);
+    }
+    sync_bo(s.ba, XCL_BO_SYNC_BO_TO_DEVICE);
+    std::vector<float> y0(physical_N), y1(physical_N);
+    Job j{&s, &bb, y0.data(), sx0, physical_N, physical_N, nullptr};
+    j.y2 = y1.data(); j.sx2 = sx1; j.M = 2;
+    busy = true;
+    launch(j);
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+    submit_ms += elapsed;
+    s.submit_ms += elapsed;
+    if (!wait(j)) return false;
+    int offset = 0;
+    for (int i = 0; i < count; i++) {
+      size_t bytes = tensors[i]->shape[0] * sizeof(float);
+      memcpy(ys0[i], y0.data() + offset, bytes);
+      memcpy(ys1[i], y1.data() + offset, bytes);
+      offset += physical_ns[i];
+    }
+    return true;
+  }
+
   bool wait(Job& j) {
     auto t0 = std::chrono::steady_clock::now();
     Shape& s = *j.shape;
@@ -377,9 +438,23 @@ struct NpuBackend {
       sync_bo(s.bc, XCL_BO_SYNC_BO_FROM_DEVICE);
       const uint16_t* c = (const uint16_t*)s.bc.map();
       bool allzero = true;
-      for (int i = 0; i < j.N; i++) if (c[i] != 0) { allzero = false; break; }
+      for (int i = 0; i < j.M * j.N; i++) if (c[i] != 0) { allzero = false; break; }
       if (!allzero) {
-        for (int i = 0; i < j.N; i++) j.y[i] = bf16_to_f32(c[i]) * j.sx;
+        if (j.M == 1) {
+          for (int i = 0; i < j.N; i++) j.y[i] = bf16_to_f32(c[i]) * j.sx;
+        } else {
+          float* ys[2] = {j.y, j.y2};
+          float scales[2] = {j.sx, j.sx2};
+          for (int tr = 0; tr < j.physical_N / 2048; tr++)
+            for (int col = 0; col < 8; col++)
+              for (int row = 0; row < 4; row++)
+                for (int m = 0; m < 2; m++)
+                  for (int i = 0; i < 64; i++) {
+                    int src = (((tr * 8 + col) * 4 + row) * 2 + m) * 64 + i;
+                    int dst = tr * 2048 + row * 512 + col * 64 + i;
+                    ys[m][dst] = bf16_to_f32(c[src]) * scales[m];
+                  }
+        }
         busy = false;
         double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
         wait_ms += elapsed;
