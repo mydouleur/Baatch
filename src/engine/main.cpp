@@ -4,7 +4,7 @@
 #include "baa.h"
 #include "model.h"
 #include "prefill.h"
-#include "moe_scheduler.h"
+#include "moe_prefill.h"
 #include <chrono>
 #include <fstream>
 
@@ -192,16 +192,15 @@ int main(int argc, char** argv) { try {
     if (use_prefill && ids.size() > 1) {
       int T = ids.size();
       std::vector<float> x((size_t)T * Cfg::H), x2((size_t)T * Cfg::H);
+      MoePrefillWorkspace prefill_workspace(T);
       for (int t = 0; t < T; t++) embed(ids[t], x.data() + (size_t)t * Cfg::H);
       auto t0 = std::chrono::steady_clock::now();
       for (int l = 0; l < Cfg::NLAYERS; l++) {
         if (m.is_gdn(l)) gdn_prefill(m, l, gst[l], x.data(), T, x2.data());
         else attn_prefill(m, l, ast[l], 0, x.data(), T, x2.data());
-        for (int t = 0; t < T; t++) {
-          auto mt = prof_now();
-          moe(m, l, x2.data() + (size_t)t * Cfg::H, x.data() + (size_t)t * Cfg::H);
-          prof_add(g_prof.moe[l], mt);
-        }
+        auto mt = prof_now();
+        moe_prefill(m, *moe_plans[l], prefill_workspace, x2.data(), x.data());
+        prof_add(g_prof.moe[l], mt);
       }
       float* last = x.data() + (size_t)(T - 1) * Cfg::H;
       m.nrm(fnorm, last, Cfg::H, last, true);

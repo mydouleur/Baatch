@@ -32,8 +32,8 @@
 - **M3 功能闭环**：NPU 密集 decode + CPU routed experts；三次独立 32-token 输出一致，累计 24849 次调用、0 flake。
 - **2026-10-25 分流实测**：GDN 递推仅约 9ms/token，暂缓双核；XBF4 gate_up+down 都回 CPU 后约 0.85–0.93s/token，shared down 与 CPU routed experts 重叠后约 0.74–0.76s/token。K2048/N2048 的无效 ping-pong 已接入默认资产。
 - **Fused projections 已接默认路径**：GDN qkv+z 合并为 K2048/N12288，attention q+k+v 合并为 K2048/N10240（k/v 各降 padding 到 1024），复用同一激活且不增加主权重流量。共享 gate/up/down 随后也因 padding 与调用成本默认改回 CPU。out_proj 新增 AVX-512 解包＋vpdpbusd 路径，decode 默认 CPU、prefill 默认 NPU；最终暖态 decode 约 0.30–0.35s/token，65-token prefill 9.51s、5283 次调用 0 flake。
-- **MoE scheduled 与 CPU 行权重缓存已设默认**：`moe_scheduler.h` 复用 LayerPlan、量化与 slot workspace，routed worker 与主线程 shared 重叠；`MOE_SCHEDULED=0` 可回退原路径。预平铺 XBF4 首次使用时转换为 128 通道行布局并缓存，之后直接走 AVX-512 GEMV，不再每 token 解包。shared 从约 0.9ms 降至 0.07ms/层，layer0/layer10 暖态约 0.4–0.6ms。默认 8-token decode 暖态约 170–190ms/token（5.3–5.9 tok/s），65-token prefill 12.14s（5.35 tok/s）且输出 9707 不变，NPU 0 flake。新 shared W4A8 路径会改变 greedy 序列，量化质量仍待后续验收。
-- **M=1 prefill 已闭环**：GDN/attention 64-token 分块，65-token 全模型 prefill/decode 输出一致。
+- **MoE scheduled 与 CPU 行权重缓存已设默认**：`moe_scheduler.h` 复用 LayerPlan、量化与 slot workspace，routed worker 与主线程 shared 重叠；`MOE_SCHEDULED=0` 可回退原路径。预平铺 XBF4 首次使用时转换为 128 通道行布局并缓存，之后直接走 AVX-512 GEMV，不再每 token 解包。shared 从约 0.9ms 降至 0.07ms/层，layer0/layer10 暖态约 0.4–0.6ms。默认 8-token decode 暖态约 160–190ms/token（5.3–6.2 tok/s），NPU 0 flake。新 shared W4A8 路径会改变 greedy 序列，量化质量仍待后续验收。
+- **prefill MoE 按专家多 token batch 已接默认**：`moe_prefill.h` 按 router 分组执行 gather→XBF4/XBF2 多 token GEMM→scatter，同一权重读取服务多个 token；dense 投影仍用稳定 M=1。T=1/2/8/65 的 layer0/layer10 对拍通过，65-token prefill 6.17s（10.54 tok/s），输出 9707 不变，5283 次 NPU 调用 0 flake。
 - **uniform 是过渡实验**：约 171–220ms/token，物理流量 4.73GB/token；dense 为 1.185GB/token，uniform 不是最终低功耗格式。
 - **XBF4 routed experts NPU 数值路径已验收**：按需 host 转 tile + 512MB 缓存；40 层 80 个 GEMV 全部 PASS，最大 rel_l2=0.00546。两次独立 8-token 输出一致，11420 次调用、0 flake；prefill/decode 一致。量化噪声可改变近并列路由及后续 greedy token，不要求与 CPU 逐 token 相同，质量门留待后续。
 - **MoE 单层对照**：`bench_moe` 的 current/planned 输出一致，planned 暖态无显著收益。E4×2 batch 数值通过但 layer0 暖态约 12.0ms，慢于 current 约 9.1ms。列并行 p4 每列持完整专家，数值通过、约 10.8ms，优于串行 batch 但仍慢于 current；均不接默认引擎。E6、长序列 p8、独立 BD＋去除专家间等待均挂起；不得重复这些变体。
@@ -44,11 +44,10 @@
 
 ## 下一步顺序
 
-1. 继续分解多形状切换、投影和 MoE 成本，按总收益选择 CPU/NPU。
-2. 优化 prefill 的按专家 token batching；dense M>1 仅在全部主形状闭合后接入。
-3. 建立 decode/prefill 性能、功耗与长上下文内存基线。
-4. 实现 MTP 并实测接受率、净加速。
-5. 最后做 imatrix 质量版、探针、PPL、代码任务与路由一致性。
+1. 继续分解多形状切换与投影成本，按总收益优化 NPU 有效带宽；dense M>1 仅在全部主形状闭合后接入。
+2. 建立 decode/prefill 性能、功耗与长上下文内存基线。
+3. 实现 MTP 并实测接受率、净加速。
+4. 最后做 imatrix 质量版、探针、PPL、代码任务与路由一致性。
 
 ## 实测锚点
 

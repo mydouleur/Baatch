@@ -1,4 +1,4 @@
-#include "moe_scheduler.h"
+#include "moe_prefill.h"
 #include <chrono>
 #include <random>
 
@@ -15,7 +15,7 @@ static uint64_t hash_output(const std::vector<float>& y) {
 int main(int argc, char** argv) { try {
   std::string baa = "D:/xdna_llm/models/ornith35_xbf24_dense.baa";
   std::string npu_dir = "models/npu", mode = "current", top8 = "model";
-  int layer = 0, inputs = 8, rounds = 4;
+  int layer = 0, inputs = 8, rounds = 4, prefill_tokens = 0;
   for (int i = 1; i < argc; i++) {
     std::string s = argv[i];
     if (s == "--baa") baa = argv[++i];
@@ -25,9 +25,11 @@ int main(int argc, char** argv) { try {
     else if (s == "--inputs") inputs = atoi(argv[++i]);
     else if (s == "--rounds") rounds = atoi(argv[++i]);
     else if (s == "--top8") top8 = argv[++i];
+    else if (s == "--prefill-tokens") prefill_tokens = atoi(argv[++i]);
     else throw std::runtime_error("unknown argument: " + s);
   }
   if (layer < 0 || layer >= Cfg::NLAYERS || inputs <= 0 || rounds <= 0 ||
+      prefill_tokens < 0 || prefill_tokens > inputs || (prefill_tokens && mode != "direct") ||
       (top8 != "model" && top8 != "fixed" && top8 != "random") ||
       (mode != "direct" && top8 != "model") ||
       (mode != "current" && mode != "planned" && mode != "batch" && mode != "parallel" &&
@@ -79,6 +81,33 @@ int main(int argc, char** argv) { try {
   std::uniform_real_distribution<float> dist(-1.f, 1.f);
   std::vector<float> x((size_t)inputs * Cfg::H), reference((size_t)inputs * Cfg::H), y(Cfg::H);
   for (float& v : x) v = dist(rng);
+  if (prefill_tokens) {
+    int T = prefill_tokens;
+    std::vector<float> out((size_t)T * Cfg::H);
+    auto direct_start = std::chrono::steady_clock::now();
+    for (int tok = 0; tok < T; tok++)
+      direct_moe(m, *plan, direct_workspace, x.data() + (size_t)tok * Cfg::H,
+                 reference.data() + (size_t)tok * Cfg::H);
+    double direct_ms = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - direct_start).count() * 1e3;
+    MoePrefillWorkspace prefill_workspace(T);
+    double total = 0, best = 1e30;
+    for (int r = 0; r < rounds; r++) {
+      auto start = std::chrono::steady_clock::now();
+      moe_prefill(m, *plan, prefill_workspace, x.data(), out.data());
+      double ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() * 1e3;
+      total += ms; best = std::min(best, ms);
+    }
+    double num = 0, den = 0, max_rel = 0;
+    for (size_t i = 0; i < out.size(); i++) {
+      double d = out[i] - reference[i];
+      num += d * d; den += (double)reference[i] * reference[i];
+      max_rel = std::max(max_rel, fabs(d) / (fabs(reference[i]) + 1e-4));
+    }
+    printf("PREFILL_MOE layer=%d tokens=%d rounds=%d direct_ms=%.3f batch_mean_ms=%.3f batch_min_ms=%.3f rel_l2=%.6g max_rel=%.6g\n",
+           layer, T, rounds, direct_ms, total / rounds, best, sqrt(num / (den + 1e-12)), max_rel);
+    return max_rel < 0.02 ? 0 : 3;
+  }
 
   npu.reset_stats();
   for (int i = 0; i < inputs; i++) {

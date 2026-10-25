@@ -90,6 +90,59 @@ static void gemv_xbf2_rows(const uint8_t* w, int row0, int nrows, int n_in,
   }
 }
 
+static void gemm_xbf4_rows(const uint8_t* w, int row0, int nrows, int n_in, int M, int output_stride,
+                           const int8_t* xe, const int8_t* xo, const float* sums,
+                           const float* sx, float* y) {
+  const int blocks = n_in / XBF_SB;
+  const size_t row_bytes = (size_t)blocks * 130;
+  for (int r = 0; r < nrows; r++) {
+    const uint8_t* row = w + (size_t)(row0 + r) * row_bytes;
+    for (int m = 0; m < M; m++) y[m * output_stride + r] = 0.f;
+    for (int b = 0; b < blocks; b++) {
+      const uint8_t* wb = row + b * 130;
+      float scale = bf16_to_f32(wb[0] | (wb[1] << 8));
+      for (int h = 0; h < 2; h++) {
+        __m512i z = _mm512_loadu_si512(wb + 2 + 64 * h);
+        __m512i lo = _mm512_and_si512(z, XBF4_LO);
+        __m512i hi = _mm512_and_si512(_mm512_srli_epi16(z, 4), XBF4_LO);
+        for (int m = 0; m < M; m++) {
+          __m512i acc = _mm512_dpbusd_epi32(_mm512_setzero_si512(), lo,
+              _mm512_loadu_si512(xe + (size_t)m * n_in / 2 + b * 128 + 64 * h));
+          acc = _mm512_dpbusd_epi32(acc, hi,
+              _mm512_loadu_si512(xo + (size_t)m * n_in / 2 + b * 128 + 64 * h));
+          int isum = _mm512_reduce_add_epi32(acc);
+          y[m * output_stride + r] += (isum - 4 * (int)sums[m * blocks + b]) * sx[m] * scale;
+        }
+      }
+    }
+  }
+}
+
+static void gemm_xbf2_rows(const uint8_t* w, int row0, int nrows, int n_in, int M, int output_stride,
+                           const int8_t* xq4, const float* sums, const float* sx, float* y) {
+  const int blocks = n_in / XBF_SB;
+  const size_t row_bytes = (size_t)blocks * 66;
+  for (int r = 0; r < nrows; r++) {
+    const uint8_t* row = w + (size_t)(row0 + r) * row_bytes;
+    for (int m = 0; m < M; m++) y[m * output_stride + r] = 0.f;
+    for (int b = 0; b < blocks; b++) {
+      const uint8_t* wb = row + b * 66;
+      float scale = bf16_to_f32(wb[0] | (wb[1] << 8));
+      __m512i z = _mm512_loadu_si512(wb + 2);
+      __m512i f[4];
+      for (int t = 0; t < 4; t++) f[t] = _mm512_and_si512(_mm512_srli_epi16(z, 2 * t), XBF2_M);
+      for (int m = 0; m < M; m++) {
+        int isum = 0;
+        for (int t = 0; t < 4; t++) {
+          __m512i xv = _mm512_loadu_si512(xq4 + (size_t)m * n_in + t * n_in / 4 + b * 64);
+          isum += _mm512_reduce_add_epi32(_mm512_dpbusd_epi32(_mm512_setzero_si512(), f[t], xv));
+        }
+        y[m * output_stride + r] += (isum - 2 * (int)sums[m * blocks + b]) * sx[m] * scale;
+      }
+    }
+  }
+}
+
 static inline void dequant_xbf4_row(const uint8_t* wrow, int C, float* out) {
   for (int sb = 0; sb < C / 256; sb++) {
     const uint8_t* wsb = wrow + sb * 130;

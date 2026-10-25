@@ -121,8 +121,9 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
 
 ## Prefill 与当前优化
 
-- M=1 prefill 已实现：GDN/attention 64-token 分块、prompt lm_head 只算末 token、
-  prefill→decode 状态衔接。65-token 全模型与原 decode 输出完全一致、flake=0。
+- M=1 dense prefill 已实现：GDN/attention 64-token 分块、prompt lm_head 只算末 token、
+  prefill→decode 状态衔接。MoE 按专家 gather→多 token GEMM→scatter，T=1/2/8/65
+  的 XBF4/XBF2 层对拍通过；65-token prefill 6.17s（10.54 tok/s），输出一致、flake=0。
 - M>1 采用打包 A/C FIFO + kernel 内权重 tile 复用；K2048/N2048 全套数值 PASS，
   M2 0.265ms vs M1×2 0.332ms。多块 N4096/N8192 与 K4096 未闭合，未接入引擎；
   fused `_m` 仍有 wn 车道错误，稳定版本逐行调用 M1 kernel。
@@ -131,7 +132,7 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
 - MoE scheduled 已设默认，`MOE_SCHEDULED=0` 回退；预平铺 XBF4 首次转换为 128 通道
   行权重并缓存，shared/out_proj 不再每 token 解包。shared 约 0.9→0.07ms/层，layer0/layer10
   暖态约 0.4–0.6ms；默认 decode 约 170–190ms/token（5.3–5.9 tok/s），65-token prefill
-  12.14s（5.35 tok/s），NPU 0 flake。`bench_moe` 另有 direct/scheduled、固定/随机 top8
+  6.17s（10.54 tok/s），NPU 0 flake。`bench_moe` 另有 direct/scheduled、固定/随机 top8
   与 GEMV/同步/量化分项；4/8 routed 线程无稳定收益，保持两线程。
 - CPU 激活量化、整数求和、偶奇/模4拆分已 AVX-512 化，单测与层对拍 PASS。
 - `--npu-layout fast` 过渡实验已停止，不再缩小既定 NPU 分工。balanced 也没有实质收益。
