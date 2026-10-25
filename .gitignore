@@ -24,9 +24,14 @@ probes/**/*.elf
 __pycache__/
 *.pyc
 
-# 安装包与大文件
+# 安装包、构建与调试产物
 *.exe
 *.bin
+*.obj
+*.pdb
+*.ilk
+*.npy
+*.npz
 
 # 系统
 .DS_Store
