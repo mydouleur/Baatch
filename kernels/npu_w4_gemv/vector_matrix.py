@@ -211,7 +211,13 @@ def my_matmul(dev, N, K, M=1):
                                     metadata=memA_fifos[col], bd_id=bd_id_base + 3, mem=A,
                                     sizes=[1, 1, 1, K], strides=[0, 0, 0, 1],
                                 )
-                            if M > 1:
+                            if M >= 4:
+                                npu_dma_memcpy_nd(
+                                    metadata=memA_fifos[col], bd_id=bd_id_base + 3, mem=A,
+                                    sizes=[1, 1, K_div_k, M * k],
+                                    strides=[0, 0, M * k, 1],
+                                )
+                            elif M > 1:
                                 for a_tile in range(K_div_k):
                                     npu_dma_memcpy_nd(
                                         metadata=memA_fifos[col],

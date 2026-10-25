@@ -128,7 +128,8 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
 - M>1 采用打包 A/C FIFO + kernel 内权重 tile 复用，A FIFO 深度 8 修复跨组覆盖；
   M2 两行共享一次 W4 解包和 B 加载。K2048/N12288 随机与独立行 PASS，1000 次均值
   0.678ms vs M1×2 1.012ms；N10240 0.619ms vs 0.760ms。K4096/N2048 仍确定性
-  ERT timeout；通用 M4 数值 FAIL。M2 成对引擎实验在跨权重/激活时序下出现成对块
+  ERT timeout；M4/M8 主 Shape standalone 已用单个二维 ND A BD 闭合，但未接入。
+  M2 成对引擎实验在跨权重/激活时序下出现成对块
   损坏，最终 hidden rel_l2=0.528；新建 run 不能修复，接入已移除，默认保持 M1。
 - M=1 K4096/N2048 已删除无效 ping-pong 并接默认资产：暖态 avg 0.332→0.221ms；
   65-token prefill 49.63→46.21s，输出一致、38193 次调用 0 flake。

@@ -40,6 +40,7 @@ def main():
     ap.add_argument("--n", type=int, default=None)
     ap.add_argument("--m", type=int, default=1)
     ap.add_argument("--pattern", default=None)
+    ap.add_argument("--independent-rows", action="store_true")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     K = a.size
@@ -152,7 +153,12 @@ def main():
         Z = np.pad(Z, ((0, 0), (0, physical_N - N)), constant_values=8)
         N = physical_N
 
-    A = np.repeat(A[None, :], M, axis=0)
+    if a.independent_rows:
+        if a.pattern:
+            ap.error("--independent-rows cannot be combined with --pattern")
+        A = rng.integers(-128, 128, size=(M, K)).astype(np.int16)
+    else:
+        A = np.repeat(A[None, :], M, axis=0)
     if a.pattern and a.pattern.startswith("arows"):
         values = [int(x) for x in a.pattern.split(":")[1].split(",")]
         if len(values) != M:

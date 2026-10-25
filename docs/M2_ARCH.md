@@ -44,7 +44,7 @@ serve/CLI（后续）
 
 - M=1 已闭环：GDN/attention 64-token 分块，prompt lm_head 只计算末 token。prefill 大投影与 out_proj 默认两核 CPU，`NPU_PROJ=1`/`NPU_OUT_PROJ=1` 保留 NPU 对照。
 - prefill 与 decode 共享 conv/SSM/KV 状态，65-token 全模型对拍一致。
-- M2 的 K2048 多 Shape standalone 数值闭合并有 kernel 收益；A FIFO 深度 8 修复跨组覆盖。K4096/N2048 仍 ERT timeout。成对引擎路径在跨权重/激活时序下出现块损坏，hidden rel_l2=0.528，接入已移除，默认保持 M1。
+- M2 的 K2048 多 Shape standalone 数值闭合并有 kernel 收益；A FIFO 深度 8 修复跨组覆盖。M4/M8 主 fused Shape standalone 也已闭合，M>=4 使用单个二维 ND A BD；M8 相对 M4 的每 token 收益仅约 7%，详见 kernel README。K4096/N2048 M2 仍 ERT timeout。成对引擎路径在跨权重/激活时序下出现块损坏，hidden rel_l2=0.528，接入已移除，默认保持 M1。
 
 ## 6. MTP（后续）
 

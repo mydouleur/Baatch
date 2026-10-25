@@ -110,3 +110,29 @@ test_host.exe build_4096/w4_4096.xclbin build_4096/insts.bin data_w4 20
 ```
 
 Host ABI：arg0=opcode 3，arg1=instr BO，arg2=instr 字数，arg3=A，arg4=B，arg5=C（bf16）。
+
+## M4/M8 standalone prefill 原型（2026-10-26）
+
+`test_prefill_batch.cpp` 在同一可执行文件内顺序运行 M1×M 与 batched M，二者使用相同的随机 A/B 和 CPU reference。A 按 `[k_tile,m,k]` 打包，M>1 的 C 按 `[transfer,col,row,m,n]` 验证。每次迭代逐值检查精确差异和 `rel>2e-2 && abs>5e-3` 容差；计时包含 run 创建、提交、等待和每次输出同步，不包含 CPU reference 比对。`gen_data_i8.py --independent-rows` 生成独立随机行。
+
+```bash
+bash build_prefill_host.sh
+K=2048 N=12288 M=4 bash build_m2.sh
+python gen_data_i8.py --out <data> --size 2048 --n 12288 --m 4 --independent-rows
+# 每次上机都必须使用外部看门狗；路径按实际资产替换。
+timeout --kill-after=5s 40s <work>/test_prefill_batch.exe \
+  <m4.xclbin> <m4.insts> <m1.xclbin> <m1.insts> <data> 2048 12288 4 3 both
+```
+
+M4/M8 分支按行对复用 M2 微内核，每次权重 DMA 服务 M 行；`noinline` 隔离是必需的，内联两个行对会产生约 1KB 向量栈 spill 并挂起。M>=4 的 A 传输使用一个二维 ND BD 描述全部 k-tile；旧版 16 个独立 BD 会随机缺一个 k-tile。M1/M2 的 A 路径与 FIFO 深度保持原样。四累加器版本在 N2048/N12288 均 ERT timeout；A FIFO 深度 10/12/16 超过实际 BD 分配能力，5 个 A BD 轮转也未闭合，均未采用。
+
+K2048/N12288 随机独立行与常数独立行各 20 轮均在 M4/M8 逐值 PASS。随后相同随机数据、同 host 二进制的 1000 轮性能对照每轮也全部逐值 PASS，暖态取 995 轮：
+
+| 对照 | batch 平均 ms | 每 token ms | 物理权重字节 | 有效 GB/s | batch 相对 M1×M |
+|---|---:|---:|---:|---:|---:|
+| M1×4 | 1.764343 | 0.441086 | 53,477,376 | 30.310 | — |
+| M4 | 0.713996 | 0.178499 | 13,369,344 | 18.725 | -59.532%，2.471× |
+| M1×8 | 3.510150 | 0.438769 | 106,954,752 | 30.470 | — |
+| M8 | 1.324756 | 0.165595 | 13,369,344 | 10.092 | -62.259%，2.650× |
+
+M8 相对 M4 每 token 仅再降 7.229%，batch 时间为 1.855×；权重复用可扩展，但行对计算成本接近线性增长。这些是 standalone 投影结果，不是端到端 prefill tok/s。早期诊断共 3 次 timeout 后登记复位，每次复位后的 M1 均 PASS；ND 修复后的 M4/M8 与性能对照均 0 flake，默认引擎未接入这些资产。

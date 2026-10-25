@@ -174,6 +174,12 @@ static void vecmat_w4a16int_m2(const int16_t *__restrict a0, const int16_t *__re
   aie::store_v(c1, aie::add(cacc1, prod1).template to_vector<bfloat16>());
 }
 
+__attribute__((noinline))
+static void vecmat_w4a16int_m2_isolated(const int16_t *a0, const int16_t *a1,
+                                        const int8_t *b, bfloat16 *c0, bfloat16 *c1) {
+  vecmat_w4a16int_m2(a0, a1, b, c0, c1);
+}
+
 extern "C" {
 
 void vecmat_vectorized_bf16_bf16(bfloat16 *a_in, int8 *b_in, bfloat16 *c_out) {
@@ -187,6 +193,10 @@ void vecmat_vectorized_bf16_bf16_m(bfloat16 *a_in, int8 *b_in, bfloat16 *c_out) 
   const int16_t* q = reinterpret_cast<const int16_t *>(a_in);
 #if DIM_M == 2
   vecmat_w4a16int_m2(q, q + 128, b_in, c_out, c_out + 64);
+#elif DIM_M == 4 || DIM_M == 8
+  for (int m = 0; m < DIM_M; m += 2)
+    vecmat_w4a16int_m2_isolated(q + m * 128, q + (m + 1) * 128, b_in,
+                                c_out + m * 64, c_out + (m + 1) * 64);
 #else
   for (int m = 0; m < DIM_M; m++) vecmat_w4a16int(q + m * 128, b_in, c_out + m * 64);
 #endif
