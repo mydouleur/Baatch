@@ -4,6 +4,7 @@
 #include "baa.h"
 #include "model.h"
 #include "prefill.h"
+#include "moe_scheduler.h"
 #include <chrono>
 #include <fstream>
 
@@ -151,6 +152,10 @@ int main(int argc, char** argv) { try {
     fprintf(stderr, "ckpt1: embed=%llu lm_head=%llu norm ok\n", emb.size, lmh.size);
     std::vector<GdnState> gst(Cfg::NLAYERS);
     std::vector<AttnState> ast(Cfg::NLAYERS);
+    std::vector<std::unique_ptr<MoeLayerPlan>> moe_plans;
+    for (int l = 0; l < Cfg::NLAYERS; l++) moe_plans.push_back(std::make_unique<MoeLayerPlan>(m, l));
+    std::unique_ptr<MoeScheduler> moe_scheduler;
+    if (env_flag("MOE_SCHEDULED")) moe_scheduler = std::make_unique<MoeScheduler>(m);
     fprintf(stderr, "ckpt2: states alloc ok\n");
     std::vector<float> logits(Cfg::VOCAB);
     auto embed = [&](int tok, float* x) {
@@ -171,7 +176,8 @@ int main(int argc, char** argv) { try {
         if (m.is_gdn(l)) gdn_decode(m, l, gst[l], dx.data(), dx2.data());
         else attn_decode(m, l, ast[l], pos, dx.data(), dx2.data());
         auto mt = prof_now();
-        moe(m, l, dx2.data(), dx.data());
+        if (moe_scheduler) moe_scheduler->run(*moe_plans[l], dx2.data(), dx.data());
+        else moe(m, l, dx2.data(), dx.data());
         prof_add(g_prof.moe[l], mt);
       }
       m.nrm(fnorm, dx.data(), Cfg::H, dx.data(), true);

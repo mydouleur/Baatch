@@ -16,6 +16,7 @@
 - CPU 激活量化、整数求和、偶奇/模4拆分已向量化。
 - XBF4 routed experts NPU：40 层 80 个 GEMV 全部 PASS，最大 rel_l2=0.00546；独立生成及 prefill/decode 一致，0 flake，XBF2 保持 CPU。
 - MoE 单层 current/planned 输出一致，planned 暖态无显著收益。E4×2 batch 数值通过但更慢（layer0 约 12.0ms vs current 约 9.1ms）。列并行 p4 每列持完整专家，数值通过、约 10.8ms，优于串行 batch 但仍慢于 current；均不进入全模型。
+- direct/scheduled MoE 复用量化、指针与 workspace，单层 hash 与 current 一致；对照收益约 3%，未达 CPU routed 8ms 目标，默认不接，`MOE_SCHEDULED=1` 可选。
 
 ## 当前执行顺序
 

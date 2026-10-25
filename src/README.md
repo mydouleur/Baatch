@@ -128,6 +128,8 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   fused `_m` 仍有 wn 车道错误，稳定版本逐行调用 M1 kernel。
 - M=1 K4096/N2048 已删除无效 ping-pong 并接默认资产：暖态 avg 0.332→0.221ms；
   65-token prefill 49.63→46.21s，输出一致、38193 次调用 0 flake。
+- MoE direct/scheduled 复用量化、LayerPlan 与 slot workspace，单层 hash 与 current 一致；
+  对照收益约 3%，未达 CPU routed 8ms 目标，默认仍走原 `moe()`，`MOE_SCHEDULED=1` 可选。
 - CPU 激活量化、整数求和、偶奇/模4拆分已 AVX-512 化，单测与层对拍 PASS。
 - `--npu-layout fast` 过渡实验已停止，不再缩小既定 NPU 分工。balanced 也没有实质收益。
 - `bench_moe` 支持 current/planned/batch/parallel 单层对照。planned 数值一致但暖态无显著收益；
