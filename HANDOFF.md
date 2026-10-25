@@ -9,9 +9,9 @@
 ## 当前设计定案（2026-10-25 实测修订）
 
 - **XBF2/XBF4 routed experts 默认走 CPU**；XBF4 的 NPU 路径仅留实验对照。
-- **共享专家、attention/GDN 大投影、MTP 头、lm_head → NPU**。
-- **GDN 状态递推、embedding、router/top-k、采样、fallback → CPU**。其他部件按实测总成本分流。
-- 默认 CPU routed experts 与 NPU shared down 重叠；不得仅按“专家/非专家”机械分流。
+- **共享专家、routed experts、GDN 状态递推、embedding、router/top-k、采样、fallback 默认走 CPU**。
+- **attention/GDN 大投影、MTP 头、lm_head → NPU**；out_proj 在 decode 默认走 AVX-512 CPU，在 prefill 默认走 NPU，其他部件按实测总成本分流。
+- GDN qkv+z、attention q+k+v 使用 fused projections；不得仅按“专家/非专家”机械分流。
 
 ## 目录地图
 
@@ -30,7 +30,8 @@
 ## 当前实现状态
 
 - **M3 功能闭环**：NPU 密集 decode + CPU routed experts；三次独立 32-token 输出一致，累计 24849 次调用、0 flake。
-- **2026-10-25 分流实测**：GDN 递推仅约 9ms/token，暂缓双核；XBF4 gate_up+down 都回 CPU 后约 0.85–0.93s/token，shared down 与 CPU routed experts 重叠后约 0.74–0.76s/token。65-token 默认路径 prefill 41.83s、16753 次调用 0 flake。K2048/N2048 的无效 ping-pong 也已接入默认资产。
+- **2026-10-25 分流实测**：GDN 递推仅约 9ms/token，暂缓双核；XBF4 gate_up+down 都回 CPU 后约 0.85–0.93s/token，shared down 与 CPU routed experts 重叠后约 0.74–0.76s/token。K2048/N2048 的无效 ping-pong 已接入默认资产。
+- **Fused projections 已接默认路径**：GDN qkv+z 合并为 K2048/N12288，attention q+k+v 合并为 K2048/N10240（k/v 各降 padding 到 1024），复用同一激活且不增加主权重流量。共享 gate/up/down 随后也因 padding 与调用成本默认改回 CPU。out_proj 新增 AVX-512 解包＋vpdpbusd 路径，decode 默认 CPU、prefill 默认 NPU；最终暖态 decode 约 0.30–0.35s/token，65-token prefill 9.51s、5283 次调用 0 flake。
 - **M=1 prefill 已闭环**：GDN/attention 64-token 分块，65-token 全模型 prefill/decode 输出一致。
 - **uniform 是过渡实验**：约 171–220ms/token，物理流量 4.73GB/token；dense 为 1.185GB/token，uniform 不是最终低功耗格式。
 - **XBF4 routed experts NPU 数值路径已验收**：按需 host 转 tile + 512MB 缓存；40 层 80 个 GEMV 全部 PASS，最大 rel_l2=0.00546。两次独立 8-token 输出一致，11420 次调用、0 flake；prefill/decode 一致。量化噪声可改变近并列路由及后续 greedy token，不要求与 CPU 逐 token 相同，质量门留待后续。

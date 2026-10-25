@@ -34,7 +34,11 @@ struct NpuBackend {
     xrt::bo bi, ba, bc;
     unsigned instr_words;
     int K, N;
+    long runs = 0, switches = 0;
+    double submit_ms = 0, wait_ms = 0;
+    uint64_t weight_bytes = 0;
     std::map<const void*, Weight> bcache;
+    std::map<std::vector<const void*>, Weight> fused_cache;
   };
   xrt::device dev{0};
   std::map<uint64_t, std::shared_ptr<Shape>> shapes;   // key = K<<32|N
@@ -59,6 +63,11 @@ struct NpuBackend {
     runs = flakes = bo_hits = bo_misses = shape_switches = 0;
     pack_ms = submit_ms = wait_ms = sync_ms = 0;
     physical_weight_bytes = 0; last_shape = nullptr;
+    for (auto& [key, shape] : shapes) {
+      shape->runs = shape->switches = 0;
+      shape->submit_ms = shape->wait_ms = 0;
+      shape->weight_bytes = 0;
+    }
   }
   void print_stats() const {
     printf("[npu-stats] runs=%ld flakes=%ld switches=%ld bo_hit=%ld bo_miss=%ld "
@@ -67,6 +76,10 @@ struct NpuBackend {
            runs, flakes, shape_switches, bo_hits, bo_misses, pack_ms, submit_ms, wait_ms,
            sync_ms, physical_weight_bytes / 1e6, cached_bytes / 1e6, pinned_bytes / 1e6,
            bo_budget / 1e6);
+    for (const auto& [key, shape] : shapes)
+      printf("[npu-shape] k=%d n=%d runs=%ld switches=%ld submit_ms=%.3f wait_ms=%.3f weight_MB=%.3f\n",
+             shape->K, shape->N, shape->runs, shape->switches,
+             shape->submit_ms, shape->wait_ms, shape->weight_bytes / 1e6);
   }
   template <typename Direction>
   void sync_bo(xrt::bo& b, Direction direction) {
@@ -183,6 +196,54 @@ struct NpuBackend {
     return r.first->second.bo;
   }
 
+  xrt::bo& bo_fused(Shape& s, const BaaTensor* const* tensors,
+                    const std::vector<int>& physical_ns) {
+    std::vector<const void*> key;
+    size_t bytes = 0;
+    for (int i = 0; i < (int)physical_ns.size(); i++) {
+      key.push_back(tensors[i]->data);
+      bytes += (size_t)(tensors[i]->shape[1] / 128) * (physical_ns[i] / 64) * 4352;
+    }
+    auto it = s.fused_cache.find(key);
+    if (it != s.fused_cache.end()) {
+      bo_hits++;
+      it->second.last = ++cache_clock;
+      return it->second.bo;
+    }
+    bo_misses++;
+    if (pinned_bytes + cached_bytes + bytes > bo_budget)
+      throw std::runtime_error("npu BO budget exceeded by fused weights");
+    xrt::bo b(dev, bytes, XRT_BO_FLAGS_HOST_ONLY, s.kernel.group_id(4));
+    auto t0 = std::chrono::steady_clock::now();
+    uint8_t* out = static_cast<uint8_t*>(b.map());
+    size_t dst = 0;
+    for (int cm = 0; cm < 8; cm++) {
+      for (int i = 0; i < (int)physical_ns.size(); i++) {
+        const BaaTensor& t = *tensors[i];
+        int N = (int)t.shape[0], K = (int)t.shape[1];
+        int src_n = (N + 2047) & ~2047;
+        for (int lt = cm; lt < physical_ns[i] / 64; lt += 8) {
+          for (int ltr = 0; ltr < K / 128; ltr++) {
+            if (lt * 64 < N) {
+              size_t src = ((size_t)cm * (src_n / 512) + lt / 8) * (K / 128) + ltr;
+              memcpy(out + dst, t.data + src * 4352, 4352);
+            } else {
+              memset(out + dst, 0, 4352);
+            }
+            dst += 4352;
+          }
+        }
+      }
+    }
+    if (dst != bytes) throw std::runtime_error("npu fused pack size mismatch");
+    pack_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+    sync_bo(b, XCL_BO_SYNC_BO_TO_DEVICE);
+    pinned_bytes += bytes;
+    Weight w{std::move(b), bytes, ++cache_clock, true};
+    auto inserted = s.fused_cache.emplace(std::move(key), std::move(w));
+    return inserted.first->second.bo;
+  }
+
   struct Job {
     Shape* shape;
     xrt::bo* weights;
@@ -223,9 +284,11 @@ struct NpuBackend {
     int physical_K = (t.flags & 2) ? 4096 : (t.flags & 4) || (!(t.flags & 1) && K == 512) ? 2048 : K;
     int physical_N = (t.flags & 2) || (t.flags & 8) ? 8192 : (t.flags & 4) ? 2048 : (N + 2047) & ~2047;
     Shape& s = shape_for(physical_K, physical_N);
-    if (last_shape && last_shape != &s) shape_switches++;
+    if (last_shape && last_shape != &s) { shape_switches++; s.switches++; }
     last_shape = &s;
-    physical_weight_bytes += (t.flags & 1) ? t.size : (size_t)(s.K / 128) * (s.N / 64) * 4352;
+    size_t weight_bytes = (t.flags & 1) ? t.size : (size_t)(s.K / 128) * (s.N / 64) * 4352;
+    physical_weight_bytes += weight_bytes;
+    s.weight_bytes += weight_bytes;
     xrt::bo& bb = bo_for(s, t);
     memset(s.ba.map(), 0, physical_K * 2);
     memcpy(s.ba.map(), q, K * 2);
@@ -234,7 +297,9 @@ struct NpuBackend {
     j.N = N; j.physical_N = physical_N;
     busy = true;
     launch(j);
-    submit_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+    submit_ms += elapsed;
+    s.submit_ms += elapsed;
     return true;
   }
 
@@ -244,6 +309,45 @@ struct NpuBackend {
     return wait(j);
   }
 
+  bool gemv_fused(const BaaTensor* const* tensors, int count, const float* x, float* const* ys) {
+    if (busy || count < 2) return false;
+    auto t0 = std::chrono::steady_clock::now();
+    int K = (int)tensors[0]->shape[1], physical_N = 0;
+    size_t weight_bytes = 0;
+    std::vector<int> physical_ns(count);
+    for (int i = 0; i < count; i++) {
+      int N = (int)tensors[i]->shape[0];
+      if (tensors[i]->flags != 1 || tensors[i]->shape[1] != K) return false;
+      physical_ns[i] = N <= 1024 ? 1024 : (N + 2047) & ~2047;
+      physical_N += physical_ns[i];
+      weight_bytes += (size_t)(K / 128) * (physical_ns[i] / 64) * 4352;
+    }
+    Shape& s = shape_for(K, physical_N);
+    if (last_shape && last_shape != &s) { shape_switches++; s.switches++; }
+    last_shape = &s;
+    physical_weight_bytes += weight_bytes;
+    s.weight_bytes += weight_bytes;
+    xrt::bo& bb = bo_fused(s, tensors, physical_ns);
+    aq.resize(K);
+    float sx = quant_xq16(x, K, aq.data());
+    memcpy(s.ba.map(), aq.data(), K * 2);
+    sync_bo(s.ba, XCL_BO_SYNC_BO_TO_DEVICE);
+    std::vector<float> y(physical_N);
+    Job j{&s, &bb, y.data(), sx, physical_N, physical_N, nullptr};
+    busy = true;
+    launch(j);
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+    submit_ms += elapsed;
+    s.submit_ms += elapsed;
+    if (!wait(j)) return false;
+    int offset = 0;
+    for (int i = 0; i < count; i++) {
+      memcpy(ys[i], y.data() + offset, tensors[i]->shape[0] * sizeof(float));
+      offset += physical_ns[i];
+    }
+    return true;
+  }
+
   bool wait(Job& j) {
     auto t0 = std::chrono::steady_clock::now();
     Shape& s = *j.shape;
@@ -251,12 +355,14 @@ struct NpuBackend {
       try { j.run->wait2(); }
       catch (const std::exception& e) {
         fprintf(stderr, "[npu] run 超时/挂起：%s — 不重试（看门狗语义）\n", e.what());
-        runs++;
+        runs++; s.runs++;
         ok = false; busy = false;
-        wait_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+        double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+        wait_ms += elapsed;
+        s.wait_ms += elapsed;
         return false;
       }
-      runs++;
+      runs++; s.runs++;
       sync_bo(s.bc, XCL_BO_SYNC_BO_FROM_DEVICE);
       const uint16_t* c = (const uint16_t*)s.bc.map();
       bool allzero = true;
@@ -264,7 +370,9 @@ struct NpuBackend {
       if (!allzero) {
         for (int i = 0; i < j.N; i++) j.y[i] = bf16_to_f32(c[i]) * j.sx;
         busy = false;
-        wait_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+        double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+        wait_ms += elapsed;
+        s.wait_ms += elapsed;
         return true;
       }
       flakes++;
@@ -272,7 +380,9 @@ struct NpuBackend {
     }
     fprintf(stderr, "[npu] flake ×4（记数继续）\n");
     busy = false;
-    wait_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+    wait_ms += elapsed;
+    s.wait_ms += elapsed;
     return false;
   }
 

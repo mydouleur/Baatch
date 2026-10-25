@@ -5,10 +5,16 @@ static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, i
   using namespace Cfg;
   std::vector<float> xn(T * H), qkv(T * QKV_DIM), z(T * VAL_DIM);
   std::vector<float> beta(T * VH), alpha(T * VH);
+  const auto& qw = m.T(LN(l, "linear_attn.in_proj_qkv.weight"));
+  const auto& zw = m.T(LN(l, "linear_attn.in_proj_z.weight"));
   for (int t = 0; t < T; t++) {
     m.nrm(m.T(LN(l, "input_layernorm.weight")), xin + t * H, H, xn.data() + t * H, true);
-    m.mv(m.T(LN(l, "linear_attn.in_proj_qkv.weight")), xn.data() + t * H, qkv.data() + t * QKV_DIM);
-    m.mv(m.T(LN(l, "linear_attn.in_proj_z.weight")), xn.data() + t * H, z.data() + t * VAL_DIM);
+    const BaaTensor* weights[] = {&qw, &zw};
+    float* outputs[] = {qkv.data() + t * QKV_DIM, z.data() + t * VAL_DIM};
+    if (!m.npu || !m.npu->ok || !m.npu->gemv_fused(weights, 2, xn.data() + t * H, outputs)) {
+      m.mv(qw, xn.data() + t * H, qkv.data() + t * QKV_DIM);
+      m.mv(zw, xn.data() + t * H, z.data() + t * VAL_DIM);
+    }
     m.mv(m.T(LN(l, "linear_attn.in_proj_b.weight")), xn.data() + t * H, beta.data() + t * VH);
     m.mv(m.T(LN(l, "linear_attn.in_proj_a.weight")), xn.data() + t * H, alpha.data() + t * VH);
   }
@@ -93,7 +99,7 @@ static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, i
       for (int i = 0; i < HD; i++)
         og[j * HD + i] = p[i] * inv * nw[i] * siluf(z[t * VAL_DIM + j * HD + i]);
     }
-    m.mv(m.T(LN(l, "linear_attn.out_proj.weight")), og.data(), dec.data());
+    m.mv_out_prefill(m.T(LN(l, "linear_attn.out_proj.weight")), og.data(), dec.data());
     for (int i = 0; i < H; i++) xout[t * H + i] = xin[t * H + i] + dec[i];
   }
 }
@@ -109,11 +115,18 @@ static void attn_prefill_chunk(Model& m, int l, AttnState& st, int pos0,
                                const float* xin, int T, float* xout) {
   using namespace Cfg;
   std::vector<float> xn(T * H), qg(T * QPROJ), kk(T * KVH * AHD), vv(T * KVH * AHD);
+  const auto& qw = m.T(LN(l, "self_attn.q_proj.weight"));
+  const auto& kw = m.T(LN(l, "self_attn.k_proj.weight"));
+  const auto& vw = m.T(LN(l, "self_attn.v_proj.weight"));
   for (int t = 0; t < T; t++) {
     m.nrm(m.T(LN(l, "input_layernorm.weight")), xin + t * H, H, xn.data() + t * H, true);
-    m.mv(m.T(LN(l, "self_attn.q_proj.weight")), xn.data() + t * H, qg.data() + t * QPROJ);
-    m.mv(m.T(LN(l, "self_attn.k_proj.weight")), xn.data() + t * H, kk.data() + t * KVH * AHD);
-    m.mv(m.T(LN(l, "self_attn.v_proj.weight")), xn.data() + t * H, vv.data() + t * KVH * AHD);
+    const BaaTensor* weights[] = {&qw, &kw, &vw};
+    float* outputs[] = {qg.data() + t * QPROJ, kk.data() + t * KVH * AHD, vv.data() + t * KVH * AHD};
+    if (!m.npu || !m.npu->ok || !m.npu->gemv_fused(weights, 3, xn.data() + t * H, outputs)) {
+      m.mv(qw, xn.data() + t * H, qg.data() + t * QPROJ);
+      m.mv(kw, xn.data() + t * H, kk.data() + t * KVH * AHD);
+      m.mv(vw, xn.data() + t * H, vv.data() + t * KVH * AHD);
+    }
   }
   const float* qnw = m.T(LN(l, "self_attn.q_norm.weight")).f32();
   const float* knw = m.T(LN(l, "self_attn.k_norm.weight")).f32();
@@ -179,7 +192,7 @@ static void attn_prefill_chunk(Model& m, int l, AttnState& st, int pos0,
       const float* gate = q + h * 2 * AHD + AHD;
       for (int i = 0; i < AHD; i++) attn[h * AHD + i] *= sigmoidf(gate[i]);
     }
-    m.mv(m.T(LN(l, "self_attn.o_proj.weight")), attn.data(), dec.data());
+    m.mv_out_prefill(m.T(LN(l, "self_attn.o_proj.weight")), attn.data(), dec.data());
     for (int i = 0; i < H; i++) xout[t * H + i] = xin[t * H + i] + dec[i];
   }
 }

@@ -35,7 +35,7 @@ serve/CLI（后续）
 
 ## 4. Decode
 
-- XBF2/XBF4 routed experts 默认在 CPU 执行，NPU shared down 与其重叠，MoE reduce 保持原语义。
+- 共享专家与 XBF2/XBF4 routed experts 默认在 CPU 执行，MoE reduce 保持原语义。
 - embedding 查表留在 CPU；router/top-k 和采样留在 CPU。
 - 多形状切换、无效 padding、权重 BO 缓存和同步成本需要分别计量，不能只看 kernel GB/s。
 - uniform 是减少切换的过渡实验，不是最终低功耗格式。

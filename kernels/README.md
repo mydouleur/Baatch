@@ -4,7 +4,7 @@
 
 - 本机 Windows 全链构建：MLIR 生成 → Peano kernel 编译 → aiecc/xclbinutil → XRT，常见形状约 15 秒，不再依赖 CI 往返。
 - 出货工具链使用上游公开 llvm-aie；AMD RAI 编译器仅用于开发。
-- XBF2/XBF4 routed experts 默认走 CPU；共享/密集大权重走 NPU，XBF4 专家 NPU 路径仅留实验对照。
+- 共享专家与 XBF2/XBF4 routed experts 默认走 CPU；attention/GDN 大投影和输出头走 NPU，XBF4 专家 NPU 路径仅留实验对照。
 
 ## 当前资产
 

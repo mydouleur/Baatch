@@ -3,9 +3,9 @@
 ## 当前定案
 
 - XBF2/XBF4 routed experts 默认走 CPU；XBF4 的 NPU 路径仅留实验对照。
-- 共享专家、attention/GDN 大投影、MTP 头、lm_head → NPU。
-- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；其他部件按实测总成本分流。
-- 默认 CPU routed experts 与 NPU shared down 重叠，暖态约 0.74–0.76s/token；65-token prefill 41.83s、0 flake。
+- 共享专家与 routed experts 默认走 CPU；attention/GDN 大投影、MTP 头、lm_head → NPU。
+- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；out_proj 在 decode 默认走 AVX-512 CPU，在 prefill 默认走 NPU。
+- GDN qkv+z、attention q+k+v 使用 fused projections，暖态约 0.30–0.35s/token；65-token prefill 9.51s、5283 次调用 0 flake。
 
 ## 已完成
 

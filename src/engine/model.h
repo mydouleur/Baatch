@@ -29,6 +29,7 @@ namespace Cfg {
 #include "profile.h"
 
 static void cpu_mv_pretiled(const BaaTensor& t, const float* x, float* y);
+static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y);
 
 struct GdnState {
   std::vector<float> conv;   // (CONV_K-1) × QKV_DIM
@@ -68,6 +69,15 @@ struct Model {
   // GEMV 包装：按 scheme 分发（0=BF16 5=F32 3=XBF4 4=XBF2）
   void mv(const BaaTensor& w, const float* x, float* y) {
     mv_named(w, "", x, y);
+  }
+  void mv_out(const BaaTensor& w, const float* x, float* y) {
+    if ((env_flag("CPU_OUT_PROJ") || !env_flag("NPU_OUT_PROJ")) && w.scheme == 3 && (w.flags & 1))
+      cpu_mv_pretiled_fast(w, x, y);
+    else mv(w, x, y);
+  }
+  void mv_out_prefill(const BaaTensor& w, const float* x, float* y) {
+    if (env_flag("CPU_OUT_PROJ") && w.scheme == 3 && (w.flags & 1)) cpu_mv_pretiled_fast(w, x, y);
+    else mv(w, x, y);
   }
   void mv_named(const BaaTensor& w, const std::string& name, const float* x, float* y) {
     int R = (int)w.shape[w.ndim - 2], C = (int)w.shape[w.ndim - 1];
@@ -171,6 +181,52 @@ static void cpu_mv_pretiled(const BaaTensor& t, const float* x, float* y) {
       }
 }
 
+static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y) {
+  int N = (int)t.shape[0], K = (int)t.shape[1];
+  int physical_K = (t.flags & 2) ? 4096 : (t.flags & 4) ? 2048 : K;
+  int physical_N = (t.flags & 2) || (t.flags & 8) ? 8192 : (t.flags & 4) ? 2048 : (N + 2047) & ~2047;
+  std::vector<int8_t> q(K);
+  std::vector<float> sums(K / XBF_SB);
+  float sx = quant_xq(x, K, q.data(), sums.data());
+  std::vector<int> tile_sums(physical_K / 128);
+  for (int ltr = 0; ltr < physical_K / 128; ltr++)
+    for (int i = 0; i < 128; i++) tile_sums[ltr] += q[ltr * 128 + i];
+  for (int n = 0; n < N; n++) y[n] = 0.f;
+  const uint8_t* tiles = t.data;
+  int nlt_col = physical_N / 64, idx = 0;
+  for (int cm = 0; cm < 8; cm++) {
+    for (int lt_col = cm; lt_col < nlt_col; lt_col += 8) {
+      for (int ltr = 0; ltr < physical_K / 128; ltr++, idx++) {
+        if (lt_col >= N / 64) continue;
+        const uint8_t* tp = tiles + (size_t)idx * 4352;
+        const uint16_t* sc = (const uint16_t*)(tp + 4096);
+        alignas(64) uint8_t weights[64 * 128];
+        for (int str = 0; str < 16; str++) {
+          for (int i = 0; i < 8; i++) {
+            for (int stc = 0; stc < 8; stc++) {
+              const uint32_t packed = *reinterpret_cast<const uint32_t*>(tp + (str * 8 + stc) * 32 + i * 4);
+              for (int lane = 0; lane < 4; lane++) {
+                weights[(stc * 8 + lane * 2) * 128 + str * 8 + i] = (packed >> (lane * 8)) & 0xF;
+                weights[(stc * 8 + lane * 2 + 1) * 128 + str * 8 + i] = (packed >> (lane * 8 + 4)) & 0xF;
+              }
+            }
+          }
+        }
+        for (int n = 0; n < 64; n++) {
+          __m512i acc = _mm512_setzero_si512();
+          for (int mm = 0; mm < 128; mm += 64) {
+            __m512i wv = _mm512_load_si512(weights + n * 128 + mm);
+            __m512i qv = _mm512_loadu_si512(q.data() + ltr * 128 + mm);
+            acc = _mm512_dpbusd_epi32(acc, wv, qv);
+          }
+          int isum = _mm512_reduce_add_epi32(acc);
+          y[lt_col * 64 + n] += (isum - 8 * tile_sums[ltr]) * sx * bf16_to_f32(sc[n]);
+        }
+      }
+    }
+  }
+}
+
 // ---------------- GDN decode（linear_attn，照 qwen35moe/delta-net decode 数学） ----------------
 static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* xout) {
   if (getenv("TRACE")) fprintf(stderr, "gdn %d start\n", l);
@@ -180,12 +236,18 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
   m.nrm(m.T(LN(l, "input_layernorm.weight")), xin, H, xn.data(), true);
   if (getenv("TRACE")) fprintf(stderr, "gdn %d norm done\n", l);
   const auto& qw = m.T(LN(l, "linear_attn.in_proj_qkv.weight"));
+  const auto& zw = m.T(LN(l, "linear_attn.in_proj_z.weight"));
+  const BaaTensor* fused_weights[] = {&qw, &zw};
+  float* fused_outputs[] = {qkv.data(), z.data()};
   NpuBackend::Job qjob;
-  if (m.npu_submit(qw, xn.data(), qkv.data(), qjob)) {
+  if (m.npu && m.npu->ok && m.npu->gemv_fused(fused_weights, 2, xn.data(), fused_outputs)) {
+    m.mv(m.T(LN(l, "linear_attn.in_proj_b.weight")), xn.data(), beta.data());
+    m.mv(m.T(LN(l, "linear_attn.in_proj_a.weight")), xn.data(), alpha.data());
+  } else if (m.npu_submit(qw, xn.data(), qkv.data(), qjob)) {
     m.mv(m.T(LN(l, "linear_attn.in_proj_b.weight")), xn.data(), beta.data());
     m.mv(m.T(LN(l, "linear_attn.in_proj_a.weight")), xn.data(), alpha.data());
     m.npu_finish(qw, xn.data(), qkv.data(), qjob, "in_proj_qkv");
-    m.mv(m.T(LN(l, "linear_attn.in_proj_z.weight")), xn.data(), z.data());
+    m.mv(zw, xn.data(), z.data());
   } else {
     m.mv(qw, xn.data(), qkv.data());
     if (getenv("TRACE")) fprintf(stderr, "gdn %d qkv done\n", l);
@@ -285,7 +347,7 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
   }
   std::vector<float> dec(H);
   prof_add(g_prof.gdn_state[l], pt); pt = prof_now();
-  m.mv(m.T(LN(l, "linear_attn.out_proj.weight")), og.data(), dec.data());
+  m.mv_out(m.T(LN(l, "linear_attn.out_proj.weight")), og.data(), dec.data());
   prof_add(g_prof.gdn_out[l], pt);
   for (int i = 0; i < H; i++) xout[i] = xin[i] + dec[i];
   if (getenv("TRACE")) fprintf(stderr, "gdn %d done\n", l);
@@ -310,8 +372,12 @@ static void attn_decode(Model& m, int l, AttnState& st, int pos, const float* xi
       m.mv(vw, xn.data(), vv.data());
     }
   };
+  const BaaTensor* fused_weights[] = {&qw, &kw, &vw};
+  float* fused_outputs[] = {qg.data(), kk.data(), vv.data()};
   NpuBackend::Job qjob;
-  if (kv_cpu && m.npu_submit(qw, xn.data(), qg.data(), qjob)) {
+  if (!env_flag("CPU_KV") && m.npu && m.npu->ok &&
+      m.npu->gemv_fused(fused_weights, 3, xn.data(), fused_outputs)) {
+  } else if (kv_cpu && m.npu_submit(qw, xn.data(), qg.data(), qjob)) {
     run_kv();
     m.npu_finish(qw, xn.data(), qg.data(), qjob, "q_proj");
   } else {
@@ -382,7 +448,7 @@ static void attn_decode(Model& m, int l, AttnState& st, int pos, const float* xi
   }
   std::vector<float> dec(H);
   prof_add(g_prof.attn_state[l], pt); pt = prof_now();
-  m.mv(m.T(LN(l, "self_attn.o_proj.weight")), attn.data(), dec.data());
+  m.mv_out(m.T(LN(l, "self_attn.o_proj.weight")), attn.data(), dec.data());
   prof_add(g_prof.attn_out[l], pt);
   for (int i = 0; i < H; i++) xout[i] = xin[i] + dec[i];
 }
@@ -411,14 +477,23 @@ static void moe(Model& m, int l, const float* xin, float* xout) {
     if (dbg) { fprintf(stderr, "  top8 L%d:", l); for (int t = 0; t < TOPK; t++) fprintf(stderr, " %d(%.3f)", top[t], tw[t]); fprintf(stderr, "\n"); }
   }
   std::vector<float> sg(MI), su(MI), sh(H), sgate(1);
-  m.mv(m.T(LN(l, "mlp.shared_expert.gate_proj.weight")), xn.data(), sg.data());
-  m.mv(m.T(LN(l, "mlp.shared_expert.up_proj.weight")), xn.data(), su.data());
+  const auto& sgw = m.T(LN(l, "mlp.shared_expert.gate_proj.weight"));
+  const auto& suw = m.T(LN(l, "mlp.shared_expert.up_proj.weight"));
+  if (env_flag("CPU_SHARED_GATE_UP") || !env_flag("NPU_SHARED_GATE_UP")) {
+    cpu_mv_pretiled(sgw, xn.data(), sg.data());
+    cpu_mv_pretiled(suw, xn.data(), su.data());
+  } else {
+    m.mv(sgw, xn.data(), sg.data());
+    m.mv(suw, xn.data(), su.data());
+  }
   for (int i = 0; i < MI; i++) sg[i] = siluf(sg[i]) * su[i];
   const auto& sdw = m.T(LN(l, "mlp.shared_expert.down_proj.weight"));
   NpuBackend::Job sdjob;
-  bool sd_async = !env_flag("CPU_SHARED_DOWN") && (!m.npu || !m.npu->xbf4_experts) &&
+  bool cpu_shared_down = env_flag("CPU_SHARED_DOWN") || !env_flag("NPU_SHARED_DOWN");
+  bool sd_async = !cpu_shared_down && (!m.npu || !m.npu->xbf4_experts) &&
                   m.npu_submit(sdw, sg.data(), sh.data(), sdjob);
-  if (!sd_async) m.mv(sdw, sg.data(), sh.data());
+  if (cpu_shared_down) cpu_mv_pretiled(sdw, sg.data(), sh.data());
+  else if (!sd_async) m.mv(sdw, sg.data(), sh.data());
   m.mv(m.T(LN(l, "mlp.shared_expert_gate.weight")), xn.data(), sgate.data());
 
   auto prof0 = std::chrono::steady_clock::now();
