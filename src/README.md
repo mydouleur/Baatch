@@ -124,9 +124,10 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
 - M=1 dense prefill 已实现：GDN/attention 64-token 分块、prompt lm_head 只算末 token、
   prefill→decode 状态衔接。MoE 按专家 gather→多 token GEMM→scatter，T=1/2/8/65
   的 XBF4/XBF2 层对拍通过；65-token prefill 5.92s（10.98 tok/s），输出一致、flake=0。
-- M>1 采用打包 A/C FIFO + kernel 内权重 tile 复用；K2048/N2048 全套数值 PASS，
-  M2 0.265ms vs M1×2 0.332ms。多块 N4096/N8192 与 K4096 未闭合，未接入引擎；
-  fused `_m` 仍有 wn 车道错误，稳定版本逐行调用 M1 kernel。
+- M>1 采用打包 A/C FIFO + kernel 内权重 tile 复用，A FIFO 深度 8 修复跨组覆盖。
+  K2048/N12288 随机与独立行 PASS，1000 次均值 0.844ms vs M1×2 1.012ms；N10240
+  500 次 0.642ms vs 0.760ms。K4096/N2048 仍确定性 ERT timeout；按 K 加深会超过
+  每通道 24 BD 上限。成对引擎接入无稳定端到端净收益，已移除，默认保持 M1。
 - M=1 K4096/N2048 已删除无效 ping-pong 并接默认资产：暖态 avg 0.332→0.221ms；
   65-token prefill 49.63→46.21s，输出一致、38193 次调用 0 flake。
 - 默认使用两核单份匿名模型驻留（`BAA_MMAP=1` 回退）、SMT host（`MOE_HOST_SIBLING=0`

@@ -38,7 +38,7 @@
 - **XBF4 routed experts NPU 数值路径已验收**：按需 host 转 tile + 512MB 缓存；40 层 80 个 GEMV 全部 PASS，最大 rel_l2=0.00546。两次独立 8-token 输出一致，11420 次调用、0 flake；prefill/decode 一致。量化噪声可改变近并列路由及后续 greedy token，不要求与 CPU 逐 token 相同，质量门留待后续。
 - **MoE 单层对照**：`bench_moe` 的 current/planned 输出一致，planned 暖态无显著收益。E4×2 batch 数值通过但 layer0 暖态约 12.0ms，慢于 current 约 9.1ms。列并行 p4 每列持完整专家，数值通过、约 10.8ms，优于串行 batch 但仍慢于 current；均不接默认引擎。E6、长序列 p8、独立 BD＋去除专家间等待均挂起；不得重复这些变体。
 - **M=1 out_proj 优化已接默认资产**：修复 N>=2048 时最后一次不存在的 ping-pong 传输；K4096/N2048 暖态 avg 0.332→0.221ms（约 -33%）。65-token prefill 49.63→46.21s（约 -6.9%），OUT_IDS 一致、38193 次调用 0 flake；K512/N2048 无收益未接入。
-- **M>1 prefill 仅单形状闭合**：K2048/N2048 M2 的 akt/独立行/随机及 wn/wk/sn/sk/zn/zk 全 PASS，M2 0.265ms vs M1×2 0.332ms（约 -20%），资产为 `k2048n2048m2fix`。多块 N4096/N8192 随机激活 FAIL，K4096 M2 ERT timeout，未接入引擎； fused `_m` 的 wn 仍有车道错误，逐行调用 M1 kernel 才正确。双 A FIFO/单流交织/A 等待均死锁，禁止直接重复。
+- **M2 FIFO 修复已闭合 K2048 主 fused Shape**：A FIFO 深度在 M>1 时从 2 增至 8，修复跨组覆盖。N12288 随机/独立行 PASS，1000 次均值 0.844ms vs M1×2 1.012ms；N10240 随机 PASS，500 次 0.642ms vs 0.760ms；此前 N2048/N4096/N8192 也已 PASS 且有收益。K4096/N2048 M2 仍确定性 ERT timeout，复位后 M1 PASS；按 K 加深 FIFO 会超过每通道 24 BD 编译上限。`NPU_M2` 成对接入实验没有稳定端到端净收益（变化 prompt 4.762s vs M1 4.233s），已移除实验代码，默认和源码均保持 M1。fused `_m` 的 wn 车道错误仍未修复；双 A FIFO/单流交织/A 等待均禁止重复。
 - **量化质量版未完成**：当前打包仍是朴素 absmax；XBF2 的 imatrix 尚未接入，PPL/任务质量验收尚未开始。
 - 多 kernel xclbin 合并未提速；full ELF 与 XRT 2.19 不兼容；FastFlowLM 的 `xrt::module` 路径也未消除切换。
 

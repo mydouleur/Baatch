@@ -98,12 +98,12 @@ def my_matmul(dev, N, K, M=1):
             # Input A (vector - broadcast to all cores)
             for col in range(n_cols):
                 memA_fifos[col] = object_fifo(
-                    f"mem_A{col}", ShimTiles[col], MemTiles[col], 2, inA_ty,
+                    f"mem_A{col}", ShimTiles[col], MemTiles[col], 8 if M > 1 else 2, inA_ty,
                 )
             for col in range(n_cols):
                 consumers = [cores[j][col] for j in range(n_rows)]
                 inA_fifos[col] = object_fifo(
-                    f"inA{col}", MemTiles[col], consumers, 2, inA_ty,
+                    f"inA{col}", MemTiles[col], consumers, 8 if M > 1 else 2, inA_ty,
                 )
                 object_fifo_link(memA_fifos[col], inA_fifos[col])
 
