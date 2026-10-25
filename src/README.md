@@ -155,6 +155,10 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   复用同一次激活量化。固定 65+64 紧邻 A/B 平均 51.650→49.375ms，proj 17.289→15.152ms；
   最终三轮 OUT_IDS 与 HEAD 一致，layer0/layer10 direct/scheduled 哈希一致，tests PASS、0 flake。
   四块展开无继续收益，25ms/token 尚未达到。
+- 2026-10-26 decode out_proj 补上两核 Pool（原路径漏传指针而单核运行），不改 66B 布局、单行
+  XBF4 或 FP32 块序。固定 65+64 的 HEAD 平均 48.533ms、out 6.952ms；最终两轮平均
+  45.194/46.125ms、22.127/21.680 tok/s，out 4.569/4.616ms，OUT_IDS 一致、0 flake。
+  独立 scale＋连续 64B payload 与 lm_head packed 无收益，未接入；25ms/token 尚未达到。
 - CPU 激活量化、整数求和、偶奇/模4拆分已 AVX-512 化，单测与层对拍 PASS。
   GDN 状态更新与输出已融合，少读约 63MB/token；prefill 后 decode 实测最低约 67ms。
   当前约 1.78GB/token，CPU4+NPU 并发探针约 77GB/s；18ms 需约 99GB/s 且受逐层依赖限制。
