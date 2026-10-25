@@ -224,8 +224,11 @@ int main(int argc, char** argv) { try {
       warmer.join();
       if (warm_error) std::rethrow_exception(warm_error);
       float* last = x.data() + (size_t)(T - 1) * Cfg::H;
+      auto lh = prof_now();
       m.nrm(fnorm, last, Cfg::H, last, true);
+      prof_add(g_prof.final_norm, lh); lh = prof_now();
       m.mv(lmh, last, logits.data());
+      prof_add(g_prof.lm_head, lh);
       next = (int)(std::max_element(logits.begin(), logits.end()) - logits.begin());
       double ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
       printf("prefill %d tokens (%.1f ms) -> %d\n", T, ms, next);

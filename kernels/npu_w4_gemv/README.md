@@ -155,3 +155,7 @@ M8 每个 64-K 半块现在只解包一次，四个行对依次复用 `b_buf_i16
 | 算术均值 | 1.527260 | 1.031075 | -32.489%，1.481× |
 
 均值对应旧/新每 token 0.190908/0.128884ms，有效权重带宽 8.754/12.966GB/s；M8 每次物理权重 13,369,344B。三轮 M1×8 控件均值约 3.494496ms、每 token 0.436812ms、物理权重 106,954,752B、30.607GB/s。最终独立重建再测 M8 为 0.881932ms，1000 轮全值 PASS。表中对照均为串行单 context 测量；全程无 ERT timeout/reset。仅支持下一步持久 context 的受限 standalone/引擎实验，不是全 Shape 或生产验收。
+
+### 受限引擎接入（2026-10-26）
+
+引擎 `NPU_M8=1` 仅使用 K2048/N12288 资产，完整 8-token 块走持久 M8 Shape/run/BO，尾 token 走 M1；A 按 `[tile,m,k]` 打包，C 按 `[transfer,col,row,m,n]` 重排。`NPU_M8_CHECK=1` 在完整引擎内对每层每块直接计算 CPU NPU-semantics reference，而非复用 standalone 结论。65-token 320 块、256-token 1280 块均全值精确 PASS；M8 与 M1 的 65/256 下一 token 及两轮 65+64 OUT_IDS 一致，0 flake。相对当前 HEAD 默认 CPU projection 的两组总 prefill A/B：65-token 快 7.09%/5.05%，256-token 快 9.42%/11.74%。NPU 与默认 CPU 的输出 IDs 不保证一致，故默认不启用。旧 M2 成对块损坏的独立根因未据此宣称修复；高频整 Runner 重建仍有零块风险，禁止用重建规避。

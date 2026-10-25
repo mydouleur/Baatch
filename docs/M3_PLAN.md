@@ -25,7 +25,7 @@
 2. **decode 单 token 分项优化**
    N12288 旧 NPU 路径实测投影约 31.27ms/token，默认已改为数值一致的 CPU 路径；65+64 同二进制 A/B 从平均 65.37ms 降至 53.82ms。后续 MoE 按专家两核连续执行并重叠 router/shared，固定输入三轮 MoE 为 16.127–16.490ms/token，总时延 53.011–53.489ms。继续依据 `PROF=1 PROF_DECODE=1` 的逐层数据优化 out_proj、GDN 与 lm_head；不得回退 insts 热换、多 context 或已挂起的 weight-ahead 双静态入口协议。
 3. **prefill M>1 与性能功耗基线**
-   K2048 主 fused Shape 的 M2 standalone 已闭合且有 kernel 收益；K4096/N2048 仍确定性 ERT timeout。成对引擎路径出现块损坏，hidden rel_l2=0.528，接入已移除，默认保持 M1。继续按逐层成本优化 MoE/GEMM 与 decode，并建立功耗对照。
+   旧 M2 成对引擎路径曾出现 hidden rel_l2=0.528，接入保持移除，根因未宣称修复。新 M8 仅以 `NPU_M8=1` 启用 K2048/N12288 持久 context 实验，尾 token 走 M1；65/256-token 逐层逐块 CPU 对拍全值精确 PASS，M8/M1 的 65+64 OUT_IDS 一致，且相对 CPU 默认总 prefill 有 5–12% 实测收益。NPU 与默认 CPU 输出 IDs 不保证一致，因此不设默认。继续按逐层成本优化 MoE/GEMM 与 decode，并建立功耗对照。
 4. **MTP**
    实现 draft/verify/accept 与状态回滚，实测接受率和净加速。
 5. **量化质量**

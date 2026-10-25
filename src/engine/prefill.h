@@ -1,6 +1,42 @@
 #pragma once
 #include "model.h"
 
+static void check_m8_block(Model& m, int l, int t0, const char* kind,
+                           const BaaTensor* const* weights, int count,
+                           const float* x, float* const* ys, const int* y_strides) {
+  double num = 0, den = 0;
+  size_t exact_mismatches = 0;
+  int worst_m = 0, worst_i = 0;
+  double worst_rel = 0;
+  for (int row = 0; row < 8; row++) {
+    CpuXbf4Activation a(Cfg::H);
+    a.prepare(x + (size_t)row * Cfg::H, Cfg::H);
+    for (int i = 0; i < count; i++) {
+      int N = (int)weights[i]->shape[0];
+      std::vector<float> ref(N);
+      cpu_mv_pretiled_fast(*weights[i], a, ref.data(), &m.pool, true);
+      double local_num = 0, local_den = 0;
+      for (int n = 0; n < N; n++) {
+        double d = ys[i][(size_t)row * y_strides[i] + n] - ref[n];
+        num += d * d; den += (double)ref[n] * ref[n];
+        local_num += d * d; local_den += (double)ref[n] * ref[n];
+        exact_mismatches += d != 0;
+      }
+      double local_rel = sqrt(local_num / (local_den + 1e-30));
+      if (local_rel > worst_rel) {
+        worst_rel = local_rel; worst_m = row; worst_i = i;
+      }
+    }
+  }
+  double rel_l2 = sqrt(num / (den + 1e-30));
+  fprintf(stderr, "[m8-check] layer=%d block=%d kind=%s rel_l2=%.9g exact_mismatches=%zu %s\n",
+          l, t0, kind, rel_l2, exact_mismatches, rel_l2 < 1e-5 ? "PASS" : "FAIL");
+  if (rel_l2 >= 1e-5) {
+    fprintf(stderr, "[m8-check] worst_row=%d projection=%d\n", worst_m, worst_i);
+    throw std::runtime_error("M8 projection block mismatch");
+  }
+}
+
 static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, int T, float* xout) {
   using namespace Cfg;
   std::vector<float> xn(T * H), qkv(T * QKV_DIM), z(T * VAL_DIM);
@@ -11,17 +47,37 @@ static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, i
   for (int t = 0; t < T; t++)
     m.nrm(m.T(LN(l, "input_layernorm.weight")), xin + t * H, H, xn.data() + t * H, true);
   const BaaTensor* weights[] = {&qw, &zw};
-  for (int t = 0; t < T; t++) {
-    float* outputs[] = {qkv.data() + t * QKV_DIM, z.data() + t * VAL_DIM};
-    if (!env_flag("NPU_PROJ")) {
-      cpu_mv_pretiled_fast(qw, xn.data() + t * H, qkv.data() + t * QKV_DIM, &m.pool);
-      cpu_mv_pretiled_fast(zw, xn.data() + t * H, z.data() + t * VAL_DIM, &m.pool);
-    } else if (!m.npu || !m.npu->ok || !m.npu->gemv_fused(weights, 2, xn.data() + t * H, outputs)) {
-      m.mv(qw, xn.data() + t * H, qkv.data() + t * QKV_DIM);
-      m.mv(zw, xn.data() + t * H, z.data() + t * VAL_DIM);
+  const int output_strides[] = {QKV_DIM, VAL_DIM};
+  bool npu_proj = env_flag("NPU_PROJ") || env_flag("NPU_M8");
+  for (int t = 0; t < T;) {
+    float* outputs[] = {qkv.data() + (size_t)t * QKV_DIM, z.data() + (size_t)t * VAL_DIM};
+    if (t + 8 <= T && env_flag("NPU_M8") && m.npu && m.npu->ok &&
+        m.npu->gemv_fused_m8(weights, 2, xn.data() + (size_t)t * H, H, outputs, output_strides)) {
+      if (env_flag("NPU_M8_CHECK"))
+        check_m8_block(m, l, t, "gdn", weights, 2, xn.data() + (size_t)t * H,
+                       outputs, output_strides);
+      for (int u = t; u < t + 8; u++) {
+        m.mv(m.T(LN(l, "linear_attn.in_proj_b.weight")), xn.data() + (size_t)u * H,
+             beta.data() + (size_t)u * VH);
+        m.mv(m.T(LN(l, "linear_attn.in_proj_a.weight")), xn.data() + (size_t)u * H,
+             alpha.data() + (size_t)u * VH);
+      }
+      t += 8;
+      continue;
     }
-    m.mv(m.T(LN(l, "linear_attn.in_proj_b.weight")), xn.data() + t * H, beta.data() + t * VH);
-    m.mv(m.T(LN(l, "linear_attn.in_proj_a.weight")), xn.data() + t * H, alpha.data() + t * VH);
+    if (!npu_proj) {
+      cpu_mv_pretiled_fast(qw, xn.data() + (size_t)t * H, qkv.data() + (size_t)t * QKV_DIM, &m.pool);
+      cpu_mv_pretiled_fast(zw, xn.data() + (size_t)t * H, z.data() + (size_t)t * VAL_DIM, &m.pool);
+    } else if (!m.npu || !m.npu->ok ||
+               !m.npu->gemv_fused(weights, 2, xn.data() + (size_t)t * H, outputs)) {
+      m.mv(qw, xn.data() + (size_t)t * H, qkv.data() + (size_t)t * QKV_DIM);
+      m.mv(zw, xn.data() + (size_t)t * H, z.data() + (size_t)t * VAL_DIM);
+    }
+    m.mv(m.T(LN(l, "linear_attn.in_proj_b.weight")), xn.data() + (size_t)t * H,
+         beta.data() + (size_t)t * VH);
+    m.mv(m.T(LN(l, "linear_attn.in_proj_a.weight")), xn.data() + (size_t)t * H,
+         alpha.data() + (size_t)t * VH);
+    t++;
   }
   prof_add(g_prof.gdn_proj[l], pt); pt = prof_now();
 
@@ -131,18 +187,31 @@ static void attn_prefill_chunk(Model& m, int l, AttnState& st, int pos0,
   for (int t = 0; t < T; t++)
     m.nrm(m.T(LN(l, "input_layernorm.weight")), xin + t * H, H, xn.data() + t * H, true);
   const BaaTensor* weights[] = {&qw, &kw, &vw};
-  for (int t = 0; t < T; t++) {
-    float* outputs[] = {qg.data() + t * QPROJ, kk.data() + t * KVH * AHD, vv.data() + t * KVH * AHD};
-    int wide = env_flag_default("NPU_WIDE_ATTN") ? 12288 : 0;
-    if (!env_flag("NPU_PROJ")) {
-      cpu_mv_pretiled_fast(qw, xn.data() + t * H, qg.data() + t * QPROJ, &m.pool);
-      cpu_mv_pretiled_fast(kw, xn.data() + t * H, kk.data() + t * KVH * AHD, &m.pool);
-      cpu_mv_pretiled_fast(vw, xn.data() + t * H, vv.data() + t * KVH * AHD, &m.pool);
-    } else if (!m.npu || !m.npu->ok || !m.npu->gemv_fused(weights, 3, xn.data() + t * H, outputs, wide)) {
-      m.mv(qw, xn.data() + t * H, qg.data() + t * QPROJ);
-      m.mv(kw, xn.data() + t * H, kk.data() + t * KVH * AHD);
-      m.mv(vw, xn.data() + t * H, vv.data() + t * KVH * AHD);
+  const int output_strides[] = {QPROJ, KVH * AHD, KVH * AHD};
+  bool npu_proj = env_flag("NPU_PROJ") || env_flag("NPU_M8");
+  int wide = env_flag_default("NPU_WIDE_ATTN") ? 12288 : 0;
+  for (int t = 0; t < T;) {
+    float* outputs[] = {qg.data() + (size_t)t * QPROJ, kk.data() + (size_t)t * KVH * AHD,
+                        vv.data() + (size_t)t * KVH * AHD};
+    if (t + 8 <= T && wide == 12288 && env_flag("NPU_M8") && m.npu && m.npu->ok &&
+        m.npu->gemv_fused_m8(weights, 3, xn.data() + (size_t)t * H, H, outputs, output_strides, wide)) {
+      if (env_flag("NPU_M8_CHECK"))
+        check_m8_block(m, l, t, "attn", weights, 3, xn.data() + (size_t)t * H,
+                       outputs, output_strides);
+      t += 8;
+      continue;
     }
+    if (!npu_proj) {
+      cpu_mv_pretiled_fast(qw, xn.data() + (size_t)t * H, qg.data() + (size_t)t * QPROJ, &m.pool);
+      cpu_mv_pretiled_fast(kw, xn.data() + (size_t)t * H, kk.data() + (size_t)t * KVH * AHD, &m.pool);
+      cpu_mv_pretiled_fast(vw, xn.data() + (size_t)t * H, vv.data() + (size_t)t * KVH * AHD, &m.pool);
+    } else if (!m.npu || !m.npu->ok ||
+               !m.npu->gemv_fused(weights, 3, xn.data() + (size_t)t * H, outputs, wide)) {
+      m.mv(qw, xn.data() + (size_t)t * H, qg.data() + (size_t)t * QPROJ);
+      m.mv(kw, xn.data() + (size_t)t * H, kk.data() + (size_t)t * KVH * AHD);
+      m.mv(vw, xn.data() + (size_t)t * H, vv.data() + (size_t)t * KVH * AHD);
+    }
+    t++;
   }
   prof_add(g_prof.attn_proj[l], pt); pt = prof_now();
   const float* qnw = m.T(LN(l, "self_attn.q_norm.weight")).f32();

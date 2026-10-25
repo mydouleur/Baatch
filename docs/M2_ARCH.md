@@ -44,7 +44,8 @@ serve/CLI（后续）
 
 - M=1 已闭环：GDN/attention 64-token 分块，prompt lm_head 只计算末 token。prefill 大投影与 out_proj 默认两核 CPU，`NPU_PROJ=1`/`NPU_OUT_PROJ=1` 保留 NPU 对照。
 - prefill 与 decode 共享 conv/SSM/KV 状态，65-token 全模型对拍一致。
-- M2 的 K2048 多 Shape standalone 数值闭合并有 kernel 收益；A FIFO 深度 8 修复跨组覆盖。M4/M8 主 fused Shape standalone 已闭合，M>=4 使用单个二维 ND A BD。M8 四个行对已共享每半 K 解包，三轮 1000 轮均值 1.527260→1.031075ms；持久 context 的跨权重/激活与 BO 重建各 1000 轮全值 PASS，但高频整 Runner 重建仍有旧/新都出现的零块，详见 kernel README。K4096/N2048 M2 仍 ERT timeout。成对引擎路径的跨权重/激活块损坏未在 standalone 复现，接入已移除，默认保持 M1。
+- M2 的 K2048 多 Shape standalone 数值闭合并有 kernel 收益；A FIFO 深度 8 修复跨组覆盖。M4/M8 主 fused Shape standalone 已闭合，M>=4 使用单个二维 ND A BD。M8 四个行对已共享每半 K 解包，三轮 1000 轮均值 1.527260→1.031075ms；持久 context 的跨权重/激活与 BO 重建各 1000 轮全值 PASS，但高频整 Runner 重建仍有旧/新都出现的零块，详见 kernel README。K4096/N2048 M2 仍 ERT timeout。旧 M2 成对引擎接入保持移除，根因未宣称修复。
+- `NPU_M8=1` 是仅限 K2048/N12288 的持久 context prefill 实验：完整 8-token 块走 M8，尾 token 走 M1，其他 Shape 不分发 M8；`NPU_M8_CHECK=1` 启用逐层逐块 CPU NPU-semantics 直接对拍。65/256-token 分别 320/1280 块全值精确 PASS，M8 与 M1 的 65+64 OUT_IDS 一致、0 flake。相对当前 CPU 默认总 prefill 两轮 65-token 快 5.05–7.09%、256-token 快 9.42–11.74%；但 NPU 与默认 CPU 的输出 IDs 不保证一致，默认仍走 CPU projection。
 
 ## 6. MTP（后续）
 

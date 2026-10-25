@@ -132,6 +132,11 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   已共享每半 K 解包，三轮 1000 轮均值 1.527260→1.031075ms；持久 context 跨权重/
   激活及 BO 重建各 1000 轮全值 PASS，但高频整 Runner 重建仍有零块遗留风险。
   M2 成对引擎实验的成对块损坏未在 standalone 复现，接入保持移除，默认保持 M1。
+- `NPU_M8=1` 仅将 K2048/N12288 prefill 的完整 8-token 块分发到持久 M8 context，尾 token 走 M1；
+  其他 Shape 保持原路径，默认 CPU projection 与旧 `NPU_PROJ=1` M1 对照不变。`NPU_M8_CHECK=1`
+  对每层每块直接计算同量化、同 BF16 块序 CPU reference。65/256-token 共 320/1280 块全值精确 PASS，
+  M8 与 M1 的 65+64 OUT_IDS 一致、0 flake；总 prefill 两轮分别快 5.05–7.09% 和 9.42–11.74%。
+  NPU 与默认 CPU 输出 IDs 不保证一致，因此仅保留实验开关。旧 M2 根因与高频 Runner 重建零块均未宣称修复。
 - M=1 K4096/N2048 已删除无效 ping-pong 并接默认资产：暖态 avg 0.332→0.221ms；
   65-token prefill 49.63→46.21s，输出一致、38193 次调用 0 flake。
 - 默认使用两核单份匿名模型驻留（`BAA_MMAP=1` 回退）、SMT host（`MOE_HOST_SIBLING=0`
