@@ -44,7 +44,7 @@ serve/CLI（后续）
 
 - M=1 已闭环：GDN/attention 64-token 分块，prompt lm_head 只计算末 token。
 - prefill 与 decode 共享 conv/SSM/KV 状态，65-token 全模型对拍一致。
-- M2 的 K2048/N2048/N4096/N8192/N10240/N12288 已数值闭合并有 kernel 收益；A FIFO 深度 8 修复跨组覆盖。K4096/N2048 仍 ERT timeout。`NPU_M2=1` 实验路径默认关闭，配 CPU out 的 64-token chunk 约快 11.1%，65-token 无净收益，默认保持 M1。
+- M2 的 K2048 多 Shape standalone 数值闭合并有 kernel 收益；A FIFO 深度 8 修复跨组覆盖。K4096/N2048 仍 ERT timeout。成对引擎路径在跨权重/激活时序下出现块损坏，hidden rel_l2=0.528，接入已移除，默认保持 M1。
 
 ## 6. MTP（后续）
 

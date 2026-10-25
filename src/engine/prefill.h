@@ -13,20 +13,6 @@ static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, i
   const BaaTensor* weights[] = {&qw, &zw};
   for (int t = 0; t < T; t++) {
     float* outputs[] = {qkv.data() + t * QKV_DIM, z.data() + t * VAL_DIM};
-    bool done = false;
-    if (t + 1 < T && env_flag("NPU_M2") && m.npu && m.npu->ok) {
-      float* outputs1[] = {qkv.data() + (t + 1) * QKV_DIM, z.data() + (t + 1) * VAL_DIM};
-      done = m.npu->gemv_fused_pair(weights, 2, xn.data() + t * H, xn.data() + (t + 1) * H,
-                                    outputs, outputs1);
-      if (done) {
-        for (int u = t; u <= t + 1; u++) {
-          m.mv(m.T(LN(l, "linear_attn.in_proj_b.weight")), xn.data() + u * H, beta.data() + u * VH);
-          m.mv(m.T(LN(l, "linear_attn.in_proj_a.weight")), xn.data() + u * H, alpha.data() + u * VH);
-        }
-        t++;
-      }
-    }
-    if (done) continue;
     if (!m.npu || !m.npu->ok || !m.npu->gemv_fused(weights, 2, xn.data() + t * H, outputs)) {
       m.mv(qw, xn.data() + t * H, qkv.data() + t * QKV_DIM);
       m.mv(zw, xn.data() + t * H, z.data() + t * VAL_DIM);
@@ -144,16 +130,7 @@ static void attn_prefill_chunk(Model& m, int l, AttnState& st, int pos0,
   const BaaTensor* weights[] = {&qw, &kw, &vw};
   for (int t = 0; t < T; t++) {
     float* outputs[] = {qg.data() + t * QPROJ, kk.data() + t * KVH * AHD, vv.data() + t * KVH * AHD};
-    bool done = false;
     int wide = env_flag_default("NPU_WIDE_ATTN") ? 12288 : 0;
-    if (t + 1 < T && env_flag("NPU_M2") && m.npu && m.npu->ok) {
-      float* outputs1[] = {qg.data() + (t + 1) * QPROJ, kk.data() + (t + 1) * KVH * AHD,
-                           vv.data() + (t + 1) * KVH * AHD};
-      done = m.npu->gemv_fused_pair(weights, 3, xn.data() + t * H, xn.data() + (t + 1) * H,
-                                    outputs, outputs1, wide);
-      if (done) t++;
-    }
-    if (done) continue;
     if (!m.npu || !m.npu->ok || !m.npu->gemv_fused(weights, 3, xn.data() + t * H, outputs, wide)) {
       m.mv(qw, xn.data() + t * H, qg.data() + t * QPROJ);
       m.mv(kw, xn.data() + t * H, kk.data() + t * KVH * AHD);
