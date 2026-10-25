@@ -263,12 +263,61 @@ static int test_gdn_recur_prefill(std::mt19937& rng) {
   return 0;
 }
 
+static int test_gdn_conv_norm_prefill(std::mt19937& rng) {
+  constexpr int C = 8192, HD = 128;
+  std::uniform_real_distribution<float> dist(-1.f, 1.f);
+  std::vector<float> initial(3 * C), got_state(3 * C), ref_state(3 * C);
+  std::vector<float> x(C), w(4 * C), wp(4 * C), got(C), ref(C);
+  for (float& v : initial) v = dist(rng);
+  for (float& v : x) v = dist(rng);
+  for (float& v : w) v = dist(rng);
+  for (int tap = 0; tap < 4; tap++)
+    for (int c = 0; c < C; c++) wp[tap * C + c] = w[c * 4 + tap];
+  got_state = ref_state = initial;
+  for (int step = 0; step < 5; step++) {
+    for (int c = 0; c < C; c++) {
+      float s = ref_state[c] * w[c * 4]
+              + ref_state[C + c] * w[c * 4 + 1]
+              + ref_state[2 * C + c] * w[c * 4 + 2]
+              + x[c] * w[c * 4 + 3];
+      ref[c] = siluf(s);
+    }
+    memcpy(ref_state.data(), ref_state.data() + C, 2 * C * sizeof(float));
+    memcpy(ref_state.data() + 2 * C, x.data(), C * sizeof(float));
+    gdn_conv_step_prefill<C>(got_state.data(), x.data(), wp.data(), got.data());
+    if (memcmp(got.data(), ref.data(), C * sizeof(float)) != 0 ||
+        memcmp(got_state.data(), ref_state.data(), got_state.size() * sizeof(float)) != 0) {
+      printf("GDN-CONV-PREFILL step=%d FAIL\n", step);
+      return 1;
+    }
+    for (float& v : x) v = dist(rng);
+  }
+  printf("GDN-CONV-PREFILL output/state: PASS\n");
+
+  std::vector<float> nx(HD), z(HD), nw(HD), ngot(HD), nref(HD);
+  for (float& v : nx) v = dist(rng);
+  for (float& v : z) v = dist(rng);
+  for (float& v : nw) v = dist(rng);
+  float ss = 0;
+  for (int i = 0; i < HD; i++) ss += nx[i] * nx[i];
+  float inv = 1.f / sqrtf(ss / HD + 1e-6f);
+  for (int i = 0; i < HD; i++) nref[i] = nx[i] * inv * nw[i] * siluf(z[i]);
+  gdn_output_norm_prefill<HD>(nx.data(), z.data(), nw.data(), inv, ngot.data());
+  if (memcmp(ngot.data(), nref.data(), HD * sizeof(float)) != 0) {
+    printf("GDN-NORM-PREFILL FAIL\n");
+    return 1;
+  }
+  printf("GDN-NORM-PREFILL output: PASS\n");
+  return 0;
+}
+
 int main() {
   std::mt19937 rng(7);
   int bad = 0;
   bad += test_attn_qk_prefill(rng);
   bad += test_attn_pv_prefill(rng);
   bad += test_gdn_recur_prefill(rng);
+  bad += test_gdn_conv_norm_prefill(rng);
   bad += run_case<4>(2048, 512, rng);    // down_proj 形状
   bad += run_case<4>(1024, 2048, rng);   // gate_up 形状
   bad += run_case<4>(248320 / 64, 2048, rng);  // lm_head 缩样

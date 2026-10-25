@@ -230,6 +230,39 @@ static inline float sigmoidf(float x) { return 1.f / (1.f + expf(-x)); }
 static inline float softplusf(float x) { return x > 20.f ? x : log1pf(expf(x)); }
 static inline float siluf(float x) { return x / (1.f + expf(-x)); }
 
+template <int C>
+static inline void gdn_conv_step_prefill(float* state, const float* x, const float* w,
+                                         float* y, int begin = 0, int end = C) {
+  for (int c = begin; c < end; c += 16) {
+    __m512 s0 = _mm512_loadu_ps(state + c);
+    __m512 s1 = _mm512_loadu_ps(state + C + c);
+    __m512 s2 = _mm512_loadu_ps(state + 2 * C + c);
+    __m512 xv = _mm512_loadu_ps(x + c);
+    __m512 s = _mm512_mul_ps(s0, _mm512_loadu_ps(w + c));
+    s = _mm512_add_ps(s, _mm512_mul_ps(s1, _mm512_loadu_ps(w + C + c)));
+    s = _mm512_add_ps(s, _mm512_mul_ps(s2, _mm512_loadu_ps(w + 2 * C + c)));
+    s = _mm512_add_ps(s, _mm512_mul_ps(xv, _mm512_loadu_ps(w + 3 * C + c)));
+    _mm512_storeu_ps(y + c, s);
+    _mm512_storeu_ps(state + c, s1);
+    _mm512_storeu_ps(state + C + c, s2);
+    _mm512_storeu_ps(state + 2 * C + c, xv);
+  }
+  for (int c = begin; c < end; c++) y[c] = siluf(y[c]);
+}
+
+template <int HD>
+static inline void gdn_output_norm_prefill(const float* x, const float* z, const float* w,
+                                           float inv, float* y) {
+  for (int i = 0; i < HD; i++) y[i] = siluf(z[i]);
+  const __m512 vinv = _mm512_set1_ps(inv);
+  for (int i = 0; i < HD; i += 16) {
+    __m512 v = _mm512_mul_ps(_mm512_loadu_ps(x + i), vinv);
+    v = _mm512_mul_ps(v, _mm512_loadu_ps(w + i));
+    v = _mm512_mul_ps(v, _mm512_loadu_ps(y + i));
+    _mm512_storeu_ps(y + i, v);
+  }
+}
+
 template <int HD>
 static inline float attn_qk_prefill(const float* q, const float* k, int len, int stride,
                                     float* scores) {

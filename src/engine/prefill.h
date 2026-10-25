@@ -85,34 +85,31 @@ static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, i
   const float* a_log = m.T(LN(l, "linear_attn.A_log")).f32();
   const float* cw = m.T(LN(l, "linear_attn.conv1d.weight")).f32();
   const float* nw = m.T(LN(l, "linear_attn.norm.weight")).f32();
-  std::vector<float> qc(QKV_DIM), o(VAL_DIM), og(VAL_DIM), dec(H);
+  std::vector<float> qc(QKV_DIM), o(VAL_DIM), og(VAL_DIM), dec(H), cwt(4 * QKV_DIM);
+  for (int tap = 0; tap < 4; tap++)
+    for (int c = 0; c < QKV_DIM; c++) cwt[tap * QKV_DIM + c] = cw[c * 4 + tap];
   for (int t = 0; t < T; t++) {
     auto st0 = prof_now();
     float* qkv_t = qkv.data() + t * QKV_DIM;
-    for (int c = 0; c < QKV_DIM; c++) {
-      float s = st.conv[c] * cw[c * 4]
-              + st.conv[QKV_DIM + c] * cw[c * 4 + 1]
-              + st.conv[2 * QKV_DIM + c] * cw[c * 4 + 2]
-              + qkv_t[c] * cw[c * 4 + 3];
-      qc[c] = siluf(s);
-    }
-    memcpy(st.conv.data(), st.conv.data() + QKV_DIM, 2 * QKV_DIM * 4);
-    memcpy(st.conv.data() + 2 * QKV_DIM, qkv_t, QKV_DIM * 4);
+    m.pool.run([&](int id) {
+      gdn_conv_step_prefill<QKV_DIM>(st.conv.data(), qkv_t, cwt.data(), qc.data(),
+                                     id * QKV_DIM / 2, (id + 1) * QKV_DIM / 2);
+    });
 
     float* q = qc.data();
     float* k = qc.data() + KEY_DIM;
     float* v = qc.data() + KEY_DIM * 2;
-    auto l2norm = [&](float* vec) {
-      for (int h = 0; h < KH; h++) {
-        float* p = vec + h * HD;
+    m.pool.run([&](int id) {
+      for (int h = id * KH; h < (id + 1) * KH; h++) {
+        float* p = qc.data() + h * HD;
         float ss = 0;
         for (int i = 0; i < HD; i++) ss += p[i] * p[i];
         float inv = 1.f / sqrtf(ss / HD + EPS / HD) / sqrtf((float)HD);
         for (int i = 0; i < HD; i++) p[i] *= inv;
+        if (h < KH)
+          for (int i = 0; i < HD; i++) p[i] *= 1.f / sqrtf((float)HD);
       }
-    };
-    l2norm(q); l2norm(k);
-    for (int i = 0; i < KEY_DIM; i++) q[i] *= 1.f / sqrtf((float)HD);
+    });
     prof_add(g_prof.gdn_conv[l], st0); st0 = prof_now();
 
     std::fill(o.begin(), o.end(), 0.f);
@@ -134,14 +131,15 @@ static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, i
     m.pool.run([&](int id) { run_heads(id * VH / 2, (id + 1) * VH / 2); });
     prof_add(g_prof.gdn_recur[l], st0); st0 = prof_now();
 
-    for (int j = 0; j < VH; j++) {
-      float* p = o.data() + j * HD;
-      float ss = 0;
-      for (int i = 0; i < HD; i++) ss += p[i] * p[i];
-      float inv = 1.f / sqrtf(ss / HD + EPS);
-      for (int i = 0; i < HD; i++)
-        og[j * HD + i] = p[i] * inv * nw[i] * siluf(z[t * VAL_DIM + j * HD + i]);
-    }
+    m.pool.run([&](int id) {
+      for (int j = id * VH / 2; j < (id + 1) * VH / 2; j++) {
+        float* p = o.data() + j * HD;
+        float ss = 0;
+        for (int i = 0; i < HD; i++) ss += p[i] * p[i];
+        float inv = 1.f / sqrtf(ss / HD + EPS);
+        gdn_output_norm_prefill<HD>(p, z.data() + t * VAL_DIM + j * HD, nw, inv, og.data() + j * HD);
+      }
+    });
     prof_add(g_prof.gdn_norm[l], st0);
     prof_add(g_prof.gdn_state[l], pt); pt = prof_now();
     m.mv_out_prefill(m.T(LN(l, "linear_attn.out_proj.weight")), og.data(), dec.data());

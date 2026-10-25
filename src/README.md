@@ -165,6 +165,12 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   两轮均值快 3.26%，65+64 OUT_IDS 与 HEAD 一致。固定 65 总时长有离群，不宣称三轮均值收益。
   `PROF=1 PROF_STATE=1` 输出 GDN conv/递推/norm 和 attention RoPE/cache/QK/softmax/PV/gate 分项。
   PV FMA 与 head-outer 调度分别因数值不一致和性能回退撤回；decode 与其他 prefill 部件不变。
+- GDN prefill conv 四 tap 按块预排为连续数组，AVX-512 保序乘加并直接移位写回历史窗口；
+  conv、q/k L2 与 output-norm 按独立通道/头使用现有两核，原标量归约、`siluf` 与逐次乘法不变。
+  conv 连续 5 步 output/state 和 norm direct reference 逐位 PASS。固定 256-token M8+16 两轮均值
+  7755.7→7650.9ms（-1.35%），state 810.9→653.4ms，conv 206.7→88.8ms、norm
+  94.6→44.4ms；变化 65-token 均值 2764.5→2729.2ms，65+64 OUT_IDS 一致，0 flake。
+  固定 65-token 总时长基本持平，不宣称总时长收益；decode 与其他 prefill 部件不变。
 - M=1 K4096/N2048 已删除无效 ping-pong 并接默认资产：暖态 avg 0.332→0.221ms；
   65-token prefill 49.63→46.21s，输出一致、38193 次调用 0 flake。
 - 默认使用两核单份匿名模型驻留（`BAA_MMAP=1` 回退）、SMT host（`MOE_HOST_SIBLING=0`
