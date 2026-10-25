@@ -145,6 +145,12 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   32/64 因计算与缓存/写回成本退化而撤回。`MOE_PREFILL_STATS=1` 输出全 prompt 的 expert-run、
   平均复用行数及 direct/packed 权重流量；`slot_out` 按块大小分配，8/16/32/64 分别占
   0.524/1.049/2.097/4.194MB，默认路径不增长。
+- T>=16 且 expert-run M>=4 的 down 使用四行联合整数归约和 `[r][m]` 转置临时输出，
+  消除 8KB 行跨距的缓存组冲突；逐行 block 累加与 slot 0→7 归并顺序不变，T=8 保持原路径。
+  gather/hidden 拆分只处理当前 XBF scheme 所需格式。M=1..16 与转置 M=4..16 单测全值 PASS，
+  layer0/layer10 三类路由 direct 均 rel_l2=0。固定 256-token M8+16 两轮均值 7954.8ms
+  （32.18 tok/s，较 8272.9ms 快 3.84%），MoE 3158.4ms（少 5.21%），0 flake；
+  变化 65-token prompt 均值快 4.32%。K2048 多行、gate_up 转置等回退变体未接入。
 - M=1 K4096/N2048 已删除无效 ping-pong 并接默认资产：暖态 avg 0.332→0.221ms；
   65-token prefill 49.63→46.21s，输出一致、38193 次调用 0 flake。
 - 默认使用两核单份匿名模型驻留（`BAA_MMAP=1` 回退）、SMT host（`MOE_HOST_SIBLING=0`

@@ -117,6 +117,125 @@ static void gemv_xbf2_rows(const uint8_t* w, int row0, int nrows, int n_in,
   }
 }
 
+static inline __m128i reduce_add4_epi32(__m512i a0, __m512i a1, __m512i a2, __m512i a3) {
+  __m256i b0 = _mm256_add_epi32(_mm512_castsi512_si256(a0), _mm512_extracti64x4_epi64(a0, 1));
+  __m256i b1 = _mm256_add_epi32(_mm512_castsi512_si256(a1), _mm512_extracti64x4_epi64(a1, 1));
+  __m256i b2 = _mm256_add_epi32(_mm512_castsi512_si256(a2), _mm512_extracti64x4_epi64(a2, 1));
+  __m256i b3 = _mm256_add_epi32(_mm512_castsi512_si256(a3), _mm512_extracti64x4_epi64(a3, 1));
+  __m128i c0 = _mm_add_epi32(_mm256_castsi256_si128(b0), _mm256_extracti128_si256(b0, 1));
+  __m128i c1 = _mm_add_epi32(_mm256_castsi256_si128(b1), _mm256_extracti128_si256(b1, 1));
+  __m128i c2 = _mm_add_epi32(_mm256_castsi256_si128(b2), _mm256_extracti128_si256(b2, 1));
+  __m128i c3 = _mm_add_epi32(_mm256_castsi256_si128(b3), _mm256_extracti128_si256(b3, 1));
+  return _mm_hadd_epi32(_mm_hadd_epi32(c0, c1), _mm_hadd_epi32(c2, c3));
+}
+
+template <bool transposed>
+static __declspec(noinline) void gemm_xbf4_down_m4(
+                           const uint8_t* w, int row0, int nrows, int n_in, int M, int output_stride,
+                           const int8_t* xe, const int8_t* xo, const float* sums,
+                           const float* sx, float* y) {
+  const int blocks = n_in / XBF_SB;
+  const size_t row_bytes = (size_t)blocks * 130;
+  for (int r = 0; r < nrows; r++) {
+    const uint8_t* row = w + (size_t)(row0 + r) * row_bytes;
+    auto out = [&](int m) -> float& {
+      return y[transposed ? r * M + m : m * output_stride + r];
+    };
+    for (int m = 0; m < M; m++) out(m) = 0.f;
+    for (int b = 0; b < blocks; b++) {
+      const uint8_t* wb = row + b * 130;
+      float scale = bf16_to_f32(wb[0] | (wb[1] << 8));
+      __m512i lo[2], hi[2];
+      for (int h = 0; h < 2; h++) {
+        __m512i z = _mm512_loadu_si512(wb + 2 + 64 * h);
+        lo[h] = _mm512_and_si512(z, XBF4_LO);
+        hi[h] = _mm512_and_si512(_mm512_srli_epi16(z, 4), XBF4_LO);
+      }
+      int m = 0;
+      for (; m + 3 < M; m += 4) {
+        __m512i acc0 = _mm512_setzero_si512(), acc1 = _mm512_setzero_si512();
+        __m512i acc2 = _mm512_setzero_si512(), acc3 = _mm512_setzero_si512();
+        for (int h = 0; h < 2; h++) {
+          const int8_t* xeb = xe + (size_t)m * n_in / 2 + b * 128 + 64 * h;
+          const int8_t* xob = xo + (size_t)m * n_in / 2 + b * 128 + 64 * h;
+          acc0 = _mm512_dpbusd_epi32(acc0, lo[h], _mm512_loadu_si512(xeb));
+          acc1 = _mm512_dpbusd_epi32(acc1, lo[h], _mm512_loadu_si512(xeb + n_in / 2));
+          acc2 = _mm512_dpbusd_epi32(acc2, lo[h], _mm512_loadu_si512(xeb + n_in));
+          acc3 = _mm512_dpbusd_epi32(acc3, lo[h], _mm512_loadu_si512(xeb + 3 * n_in / 2));
+          acc0 = _mm512_dpbusd_epi32(acc0, hi[h], _mm512_loadu_si512(xob));
+          acc1 = _mm512_dpbusd_epi32(acc1, hi[h], _mm512_loadu_si512(xob + n_in / 2));
+          acc2 = _mm512_dpbusd_epi32(acc2, hi[h], _mm512_loadu_si512(xob + n_in));
+          acc3 = _mm512_dpbusd_epi32(acc3, hi[h], _mm512_loadu_si512(xob + 3 * n_in / 2));
+        }
+        __m128i isum = reduce_add4_epi32(acc0, acc1, acc2, acc3);
+        out(m) += (_mm_extract_epi32(isum, 0) - 8 * (int)sums[m * blocks + b]) * sx[m] * scale;
+        out(m + 1) += (_mm_extract_epi32(isum, 1) - 8 * (int)sums[(m + 1) * blocks + b]) * sx[m + 1] * scale;
+        out(m + 2) += (_mm_extract_epi32(isum, 2) - 8 * (int)sums[(m + 2) * blocks + b]) * sx[m + 2] * scale;
+        out(m + 3) += (_mm_extract_epi32(isum, 3) - 8 * (int)sums[(m + 3) * blocks + b]) * sx[m + 3] * scale;
+      }
+      for (; m < M; m++) {
+        __m512i acc = _mm512_setzero_si512();
+        for (int h = 0; h < 2; h++) {
+          acc = _mm512_dpbusd_epi32(acc, lo[h],
+              _mm512_loadu_si512(xe + (size_t)m * n_in / 2 + b * 128 + 64 * h));
+          acc = _mm512_dpbusd_epi32(acc, hi[h],
+              _mm512_loadu_si512(xo + (size_t)m * n_in / 2 + b * 128 + 64 * h));
+        }
+        int isum = _mm512_reduce_add_epi32(acc);
+        out(m) += (isum - 8 * (int)sums[m * blocks + b]) * sx[m] * scale;
+      }
+    }
+  }
+}
+
+template <bool transposed>
+static __declspec(noinline) void gemm_xbf2_down_m4(
+                           const uint8_t* w, int row0, int nrows, int n_in, int M, int output_stride,
+                           const int8_t* xq4, const float* sums, const float* sx, float* y) {
+  const int blocks = n_in / XBF_SB;
+  const size_t row_bytes = (size_t)blocks * 66;
+  for (int r = 0; r < nrows; r++) {
+    const uint8_t* row = w + (size_t)(row0 + r) * row_bytes;
+    auto out = [&](int m) -> float& {
+      return y[transposed ? r * M + m : m * output_stride + r];
+    };
+    for (int m = 0; m < M; m++) out(m) = 0.f;
+    for (int b = 0; b < blocks; b++) {
+      const uint8_t* wb = row + b * 66;
+      float scale = bf16_to_f32(wb[0] | (wb[1] << 8));
+      __m512i z = _mm512_loadu_si512(wb + 2);
+      __m512i f[4];
+      for (int t = 0; t < 4; t++) f[t] = _mm512_and_si512(_mm512_srli_epi16(z, 2 * t), XBF2_M);
+      int m = 0;
+      for (; m + 3 < M; m += 4) {
+        __m512i acc0 = _mm512_setzero_si512(), acc1 = _mm512_setzero_si512();
+        __m512i acc2 = _mm512_setzero_si512(), acc3 = _mm512_setzero_si512();
+        for (int t = 0; t < 4; t++) {
+          const int8_t* xb = xq4 + (size_t)m * n_in + t * n_in / 4 + b * 64;
+          acc0 = _mm512_dpbusd_epi32(acc0, f[t], _mm512_loadu_si512(xb));
+          acc1 = _mm512_dpbusd_epi32(acc1, f[t], _mm512_loadu_si512(xb + n_in));
+          acc2 = _mm512_dpbusd_epi32(acc2, f[t], _mm512_loadu_si512(xb + 2 * n_in));
+          acc3 = _mm512_dpbusd_epi32(acc3, f[t], _mm512_loadu_si512(xb + 3 * n_in));
+        }
+        __m128i isum = reduce_add4_epi32(acc0, acc1, acc2, acc3);
+        out(m) += (_mm_extract_epi32(isum, 0) - 2 * (int)sums[m * blocks + b]) * sx[m] * scale;
+        out(m + 1) += (_mm_extract_epi32(isum, 1) - 2 * (int)sums[(m + 1) * blocks + b]) * sx[m + 1] * scale;
+        out(m + 2) += (_mm_extract_epi32(isum, 2) - 2 * (int)sums[(m + 2) * blocks + b]) * sx[m + 2] * scale;
+        out(m + 3) += (_mm_extract_epi32(isum, 3) - 2 * (int)sums[(m + 3) * blocks + b]) * sx[m + 3] * scale;
+      }
+      for (; m < M; m++) {
+        const int8_t* xb = xq4 + (size_t)m * n_in + b * 64;
+        __m512i acc0 = _mm512_dpbusd_epi32(_mm512_setzero_si512(), f[0], _mm512_loadu_si512(xb));
+        __m512i acc1 = _mm512_dpbusd_epi32(_mm512_setzero_si512(), f[2], _mm512_loadu_si512(xb + n_in / 2));
+        acc0 = _mm512_dpbusd_epi32(acc0, f[1], _mm512_loadu_si512(xb + n_in / 4));
+        acc1 = _mm512_dpbusd_epi32(acc1, f[3], _mm512_loadu_si512(xb + 3 * n_in / 4));
+        int isum = _mm512_reduce_add_epi32(_mm512_add_epi32(acc0, acc1));
+        out(m) += (isum - 2 * (int)sums[m * blocks + b]) * sx[m] * scale;
+      }
+    }
+  }
+}
+
 static void gemm_xbf4_rows(const uint8_t* w, int row0, int nrows, int n_in, int M, int output_stride,
                            const int8_t* xe, const int8_t* xo, const float* sums,
                            const float* sx, float* y) {

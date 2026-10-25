@@ -97,9 +97,12 @@ static void moe_prefill_run(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace
     auto& gsx = w.gather_sx;
     for (int j = 0; j < M; j++) {
       int tok = tokens[j];
-      memcpy(gx.data() + (size_t)j * H, w.q4.data() + (size_t)tok * H, H);
-      memcpy(gxe.data() + (size_t)j * H / 2, w.xe.data() + (size_t)tok * H / 2, H / 2);
-      memcpy(gxo.data() + (size_t)j * H / 2, w.xo.data() + (size_t)tok * H / 2, H / 2);
+      if (gu.scheme == 3) {
+        memcpy(gxe.data() + (size_t)j * H / 2, w.xe.data() + (size_t)tok * H / 2, H / 2);
+        memcpy(gxo.data() + (size_t)j * H / 2, w.xo.data() + (size_t)tok * H / 2, H / 2);
+      } else {
+        memcpy(gx.data() + (size_t)j * H, w.q4.data() + (size_t)tok * H, H);
+      }
       memcpy(gs.data() + (size_t)j * H / XBF_SB,
              w.sums.data() + (size_t)tok * H / XBF_SB, H / XBF_SB * sizeof(float));
       gsx[j] = w.sx[tok];
@@ -125,9 +128,11 @@ static void moe_prefill_run(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace
       for (int i = 0; i < MI; i++) hd[i] = siluf(guv[i]) * guv[MI + i];
       w.hsx[j] = quant_xq(hd, MI, w.hq.data() + (size_t)j * MI,
                           w.hsums.data() + (size_t)j * MI / XBF_SB);
-      xq_split4(w.hq.data() + (size_t)j * MI, MI,
-                w.hxe.data() + (size_t)j * MI / 2, w.hxo.data() + (size_t)j * MI / 2);
-      xq_split2(w.hq.data() + (size_t)j * MI, MI, w.hq4.data() + (size_t)j * MI);
+      if (gu.scheme == 3)
+        xq_split4(w.hq.data() + (size_t)j * MI, MI,
+                  w.hxe.data() + (size_t)j * MI / 2, w.hxo.data() + (size_t)j * MI / 2);
+      else
+        xq_split2(w.hq.data() + (size_t)j * MI, MI, w.hq4.data() + (size_t)j * MI);
     }
     const BaaTensor& down = *p.down[e];
     uint64_t weight_bytes = gu.size + down.size;
@@ -135,17 +140,28 @@ static void moe_prefill_run(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace
     w.stats.direct_weight_bytes += (uint64_t)M * weight_bytes;
     w.stats.packed_weight_bytes += weight_bytes;
     R = (int)down.shape[0]; half = (R / 2 + 15) & ~15;
+    bool transposed = M >= 4 && T >= 16;
     if (down.scheme == 3) {
       m.pool.run([&](int id) {
         int begin = id == 0 ? 0 : half, end = id == 0 ? half : R;
-        gemm_xbf4_rows(down.data, begin, end - begin, MI, M, R, w.hxe.data(), w.hxo.data(),
-                       w.hsums.data(), w.hsx.data(), w.dov.data() + (size_t)begin);
+        if (transposed)
+          gemm_xbf4_down_m4<true>(down.data, begin, end - begin, MI, M, R,
+                                  w.hxe.data(), w.hxo.data(), w.hsums.data(), w.hsx.data(),
+                                  w.dov.data() + (size_t)begin * M);
+        else
+          gemm_xbf4_rows(down.data, begin, end - begin, MI, M, R, w.hxe.data(), w.hxo.data(),
+                         w.hsums.data(), w.hsx.data(), w.dov.data() + (size_t)begin);
       });
     } else if (down.scheme == 4) {
       m.pool.run([&](int id) {
         int begin = id == 0 ? 0 : half, end = id == 0 ? half : R;
-        gemm_xbf2_rows(down.data, begin, end - begin, MI, M, R, w.hq4.data(),
-                       w.hsums.data(), w.hsx.data(), w.dov.data() + (size_t)begin);
+        if (transposed)
+          gemm_xbf2_down_m4<true>(down.data, begin, end - begin, MI, M, R,
+                                  w.hq4.data(), w.hsums.data(), w.hsx.data(),
+                                  w.dov.data() + (size_t)begin * M);
+        else
+          gemm_xbf2_rows(down.data, begin, end - begin, MI, M, R, w.hq4.data(),
+                         w.hsums.data(), w.hsx.data(), w.dov.data() + (size_t)begin);
       });
     } else {
       throw std::runtime_error("prefill MoE unsupported down scheme");
@@ -156,10 +172,17 @@ static void moe_prefill_run(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace
       float weight = w.weights[(size_t)tok * TOPK + slot];
       const float* dov = w.dov.data() + (size_t)j * R;
       if (ordered_merge) {
-        memcpy(w.slot_out.data() + ((size_t)tok * TOPK + slot) * H, dov, H * sizeof(float));
+        float* out = w.slot_out.data() + ((size_t)tok * TOPK + slot) * H;
+        if (transposed)
+          for (int i = 0; i < H; i++) out[i] = w.dov[(size_t)i * M + j];
+        else
+          memcpy(out, dov, H * sizeof(float));
       } else {
         float* acc = w.acc.data() + (size_t)tok * H;
-        for (int i = 0; i < H; i++) acc[i] += weight * dov[i];
+        if (transposed)
+          for (int i = 0; i < H; i++) acc[i] += weight * w.dov[(size_t)i * M + j];
+        else
+          for (int i = 0; i < H; i++) acc[i] += weight * dov[i];
       }
     }
   }
