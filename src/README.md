@@ -137,6 +137,12 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   对每层每块直接计算同量化、同 BF16 块序 CPU reference。65/256-token 共 320/1280 块全值精确 PASS，
   M8 与 M1 的 65+64 OUT_IDS 一致、0 flake；总 prefill 两轮分别快 5.05–7.09% 和 9.42–11.74%。
   NPU 与默认 CPU 输出 IDs 不保证一致，因此仅保留实验开关。旧 M2 根因与高频 Runner 重建零块均未宣称修复。
+- K2048/N2048 M8 standalone 已验证 1000 轮全值精确 PASS，暖态 0.325598ms vs M1×8
+  1.518065ms（-78.552%）。out_proj 引擎实验将逻辑 K4096 拆成两个 K2048 半张量，独立量化、
+  分别 BF16 后 FP32 相加；65/256 的逐层逐块同语义 CPU reference 全值精确 PASS，两轮 65+64
+  候选各自 IDs 一致且 0 flake。但固定 256 严格 HEAD/候选两轮均值为 8121.85/9069.25ms
+  （候选慢 11.66%），out 1529.172→2039.695ms，固定与变化 65 也分别慢约 2.97%/2.93%。
+  无净收益，实验及 `NPU_M8_OUT` 已撤回；默认 CPU out 与原 N12288 M8 不变，未使用 K4096/N2048 M2。
 - `MOE_PREFILL_BLOCK=8/16/32/64` 启用 MoE token 块实验，`MOE_PREFILL8=1` 保留为 8 块别名；
   块内先算完全部 router/top-k，再按 expert 聚合。XBF2/XBF4 的一次权重解包都服务块内全部行，
   专家输出严格按原 top-k slot 0→7 归并。layer0/layer10 的自然、固定、随机路由与 65-token
