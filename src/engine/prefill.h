@@ -79,14 +79,12 @@ static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, i
       for (int i = 0; i < HD; i++) {
         float* sr = s + i * HD;
         const __m512 vd = _mm512_set1_ps(d[i]);
-        for (int mm = 0; mm < HD; mm += 16)
-          _mm512_storeu_ps(sr + mm, _mm512_fmadd_ps(_mm512_loadu_ps(kj + mm), vd, _mm512_loadu_ps(sr + mm)));
-      }
-      for (int i = 0; i < HD; i++) {
-        const float* sr = s + i * HD;
         __m512 acc = _mm512_setzero_ps();
-        for (int mm = 0; mm < HD; mm += 16)
-          acc = _mm512_fmadd_ps(_mm512_loadu_ps(sr + mm), _mm512_loadu_ps(qj + mm % HD), acc);
+        for (int mm = 0; mm < HD; mm += 16) {
+          __m512 updated = _mm512_fmadd_ps(_mm512_loadu_ps(kj + mm), vd, _mm512_loadu_ps(sr + mm));
+          _mm512_storeu_ps(sr + mm, updated);
+          acc = _mm512_fmadd_ps(updated, _mm512_loadu_ps(qj + mm), acc);
+        }
         o[j * HD + i] = _mm512_reduce_add_ps(acc);
       }
     }

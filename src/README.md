@@ -135,6 +135,8 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   约 6–6.3s，NPU 0 flake。`bench_moe` 另有 direct/scheduled、固定/随机 top8
   与 GEMV/同步/量化分项；4/8 routed 线程无稳定收益，保持两线程。
 - CPU 激活量化、整数求和、偶奇/模4拆分已 AVX-512 化，单测与层对拍 PASS。
+  GDN 状态更新与输出已融合，少读约 63MB/token；prefill 后 decode 实测最低约 67ms。
+  当前约 1.78GB/token，CPU4+NPU 并发探针约 77GB/s；18ms 需约 99GB/s 且受逐层依赖限制。
 - `--npu-layout fast` 过渡实验已停止，不再缩小既定 NPU 分工。balanced 也没有实质收益。
 - `bench_moe` 支持 current/planned/batch/parallel 单层对照。planned 数值一致但暖态无显著收益；
   E4×2 batch 数值通过但 layer0 约 12.0ms；列并行 p4 每列持完整专家，数值通过、

@@ -44,8 +44,8 @@
 
 ## 下一步顺序
 
-1. 继续分解多形状切换与投影成本，按总收益优化 NPU 有效带宽；dense M>1 仅在全部主形状闭合后接入。
-2. 建立 decode/prefill 性能、功耗与长上下文内存基线。
+1. 按 `docs/DESIGN.md` §10.5 的真实流量与并发带宽设计常驻 context、weight-ahead/activation-later；不得再用 `max(NPU,CPU)` 直接承诺 18ms。
+2. 建立 decode/prefill 性能、功耗与长上下文内存基线；dense M>1 仅在全部主形状闭合后接入。
 3. 实现 MTP 并实测接受率、净加速。
 4. 最后做 imatrix 质量版、探针、PPL、代码任务与路由一致性。
 

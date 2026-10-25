@@ -179,7 +179,14 @@ Backend：
 - serve 层默认（来自 Tiel 社区教训）：代码场景 repeat_penalty=1.0、presence/frequency=0、temp 0.6、min_p 0.05、--jinja；低量化档 thinking 循环用 DRY sampling
 - MTP 头必须用修复版（shisa-ai 发布的 fixed heads；Tiel 历史 issue #3 前科），打包时做接受率对拍
 
-### 10.5 社区情报备忘（2026-10-23 调查）
+### 10.5 Decode roofline 与执行图修正（2026-10-25 实测）
+
+- 当前默认每 token 物理流量约 **1.78GB**：NPU fused projections 0.535GB，CPU routed/shared/out/lm_head 0.891GB，router/小投影约 0.10GB，GDN 状态约 0.252GB。GDN 更新与输出已融合，较此前少读 63MB。
+- 同机长样本探针：CPU2/CPU4 分别约 28/48GB/s，NPU 纯读约 37GB/s；CPU2+NPU 聚合约 68GB/s，CPU4+NPU 约 77GB/s。早期 85–90GB/s 聚合目标未获支持，不得再用于承诺延迟。
+- **18ms 需要约 99GB/s 持续有效带宽**，当前流量下不成立；即使按 77GB/s 且完美聚合也需约 23ms。层内 attention/GDN→out→MoE→下一层是严格依赖，自回归 token 间也无直接流水线，不能直接使用 `max(NPU,CPU)`。
+- 普通 host 多线程不能消除这些依赖。后续 NPU 图应验证 **常驻 context、weight-ahead/activation-later**：提前搬运已知权重，激活就绪后汇合，且不得回退到 insts 热换或多 context 并发。18ms 需要新的数据流与更多流量削减；MTP 是另一条降低每接受 token 成本的路径，不与物理单步延迟混淆。
+
+### 10.6 社区情报备忘（2026-10-23 调查）
 
 - Tiel UD-IQ3_XXS（13.2GB）：路由器 F32、shexp Q6_K、线性/全注意力 Q6_K、路由专家 gate/up **全层 IQ2_S** + down IQ3_XXS——专家 gate/up 全层 2-bit 可用性已获其社区验证
 - APEX-I-MiniPlus V2.1（15.2GB，ΔPPL +0.93%）：核心层 IQ3_XXS/边缘 Q3_K、shexp Q5_K；其前作有**循环状态不稳定/上下文退化**前科（作者 V3 卡自认）→ 我们不压密集路径到 3-bit 的决策依据

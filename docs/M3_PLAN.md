@@ -22,8 +22,8 @@
 
 1. **XBF4 routed experts NPU 验收：已完成**
    路由近并列时量化噪声会改变后续 greedy token；不把与 CPU 逐 token 相同作为验收条件，质量门留待后续。
-2. **NPU 切换与无效带宽优化**
-   K4096/N2048 已去掉无效 ping-pong，暖态 avg 0.332→0.221ms，65-token prefill 约快 6.9%，已接默认资产。其余形状继续按收益逐项验收；uniform 仅作过渡。
+2. **NPU 执行图与无效带宽优化**
+   N12288 复用已消除 decode 主投影切换，GDN 更新/输出融合少读 63MB/token。当前约 1.78GB/token，CPU4+NPU 实测聚合约 77GB/s，18ms 需要约 99GB/s 且受逐层依赖限制。下一步验证常驻 context、weight-ahead/activation-later；不得回退 insts 热换或多 context。
 3. **prefill M>1 与性能功耗基线**
    仅 K2048/N2048 M2 数值闭合且比 M1×2 快约 20%；多块 N4096/N8192 和 K4096 未闭合，全部主投影接入前不得替换 M1。随后建立 decode/prefill 性能与功耗对照。
 4. **MTP**
