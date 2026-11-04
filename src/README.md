@@ -311,3 +311,18 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   0 flake、无 timeout/reset，标准 tests 均 PASS。候选源码、编译开关及新增单测全部
   撤回，默认 out 与 direct_routed 已验证双链各自保持不变；routed 的约 5% GEMV 收益
   不能转化为 out 总时延收益，不重复该变体。
+- 2026-11-05 最终 HEAD `b83c6e7` 交付验收：全新 MSVC 目录干净重建 engine/bench_moe/test_kernels，
+  标准 tests `OVERALL PASS`。默认 NPU_M8/MoE16/OUT16 固定 65+64 两轮 prefill 为
+  2274.6/2158.4ms（28.576/30.115 tok/s），decode 平均 46.528/46.350ms、中位
+  38.250/39.000ms、nearest-rank p95 46.400/42.700ms、21.492/21.575 tok/s；最大
+  509.4/486.8ms 均为首 token 离群且未从统计剔除。两轮 OUT_IDS 均为 64 个 17，每轮 361 次
+  NPU 调用 0 flake。固定 256 prefill 两轮为 5917.3/5987.1ms（43.263/42.759 tok/s），下一
+  token 均为 5；proj/state/out/MoE/final_norm/lm_head 分项分别为
+  1687.342/569.549/719.800/2713.974/0.004/77.575ms 与
+  1781.071/569.813/703.107/2713.698/0.003/78.178ms，每轮 1281 次调用 0 flake。
+  全 `0` legacy 65+64 回退 prefill 2696.2ms（24.108 tok/s），decode 平均/中位/p95/最大
+  38.730/38.300/40.900/47.400ms（25.820 tok/s），OUT_IDS 为
+  `1,63,1,63,1,63,1,63,1,63,1,63,1,63,1,63,1,63,1,63,1,63,1,63,1,63,63,63,1,63,1,63,1,63,63,1,63,1,63,63,1,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,5,1,63,2,5,4,18,17`，1 次调用 0 flake。最终稳定 M1 smoke 的 8 个 CPU reference 全 PASS，
+  冷/暖共 640 次调用 0 flake；本批共 3925 次 NPU 调用 0 flake、0 timeout/reset，NPU 最终健康。
+  decode 25ms 与长 prompt 数千 tok/s 均未达到，不进入 MTP；旧 M2 根因、高频 Runner 重建零块、
+  imatrix/PPL/任务质量仍未闭合。
