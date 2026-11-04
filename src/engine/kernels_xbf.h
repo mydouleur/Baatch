@@ -117,6 +117,35 @@ static void gemv_xbf2_rows(const uint8_t* w, int row0, int nrows, int n_in,
   }
 }
 
+static void gemv_xbf2_rows_dual_acc(const uint8_t* w, int row0, int nrows, int n_in,
+                                    const int8_t* const* xq4,
+                                    const float* sumxq_sb, float sx, float* y) {
+  const int sb_per_row = n_in / XBF_SB;
+  const size_t row_bytes = (size_t)sb_per_row * 66;
+  for (int r = 0; r < nrows; r++) {
+    const uint8_t* rowp = w + (size_t)(row0 + r) * row_bytes;
+    float yr = 0.f;
+    for (int sb = 0; sb < sb_per_row; sb++) {
+      const uint8_t* wsb = rowp + sb * 66;
+      float scale = bf16_to_f32(wsb[0] | (wsb[1] << 8));
+      __m512i z = _mm512_loadu_si512(wsb + 2);
+      __m512i f0 = _mm512_and_si512(z, XBF2_M);
+      __m512i f1 = _mm512_and_si512(_mm512_srli_epi16(z, 2), XBF2_M);
+      __m512i f2 = _mm512_and_si512(_mm512_srli_epi16(z, 4), XBF2_M);
+      __m512i f3 = _mm512_and_si512(_mm512_srli_epi16(z, 6), XBF2_M);
+      __m512i acc0 = _mm512_dpbusd_epi32(_mm512_setzero_si512(), f0,
+                                         _mm512_loadu_si512(xq4[0] + sb * 64));
+      __m512i acc1 = _mm512_dpbusd_epi32(_mm512_setzero_si512(), f1,
+                                         _mm512_loadu_si512(xq4[1] + sb * 64));
+      acc0 = _mm512_dpbusd_epi32(acc0, f2, _mm512_loadu_si512(xq4[2] + sb * 64));
+      acc1 = _mm512_dpbusd_epi32(acc1, f3, _mm512_loadu_si512(xq4[3] + sb * 64));
+      int isum = _mm512_reduce_add_epi32(_mm512_add_epi32(acc0, acc1));
+      yr += (float)(isum - 2 * (int)sumxq_sb[sb]) * sx * scale;
+    }
+    y[row0 + r] = yr;
+  }
+}
+
 static inline __m128i reduce_add4_epi32(__m512i a0, __m512i a1, __m512i a2, __m512i a3) {
   __m256i b0 = _mm256_add_epi32(_mm512_castsi512_si256(a0), _mm512_extracti64x4_epi64(a0, 1));
   __m256i b1 = _mm256_add_epi32(_mm512_castsi512_si256(a1), _mm512_extracti64x4_epi64(a1, 1));
