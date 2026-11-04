@@ -270,6 +270,37 @@ static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y,
   cpu_mv_pretiled_fast(t, a, y, pool, npu_semantics);
 }
 
+static void cpu_mv_pretiled_fused_decode(const BaaTensor* const* weights, float* const* outputs,
+                                         int count, const CpuXbf4Activation& a, Pool& pool) {
+  for (int p = 0; p < count; p++) cpu_prepare_pretiled(*weights[p]);
+  pool.run_all([&](int id) {
+    int k = (int)weights[0]->shape[1];
+    size_t row_bytes = (size_t)(k / 128) * 66;
+    int begins[3], ends[3], common = 0;
+    const uint8_t* rows[3];
+    float* out[3];
+    for (int p = 0; p < count; p++) {
+      int n = (int)weights[p]->shape[0];
+      begins[p] = n * id / pool.workers;
+      ends[p] = n * (id + 1) / pool.workers;
+      int rows_here = ends[p] - begins[p];
+      common = p == 0 ? rows_here : std::min(common, rows_here);
+      rows[p] = weights[p]->cpu_rows.data() + (size_t)begins[p] * row_bytes;
+      out[p] = outputs[p] + begins[p];
+    }
+    if (count == 2)
+      gemv_xbf4_128_multi_rows_npu<2>(rows, common, k, a.xe.data(), a.xo.data(),
+                                      a.tile_sums.data(), a.sx, out);
+    else
+      gemv_xbf4_128_multi_rows_npu<3>(rows, common, k, a.xe.data(), a.xo.data(),
+                                      a.tile_sums.data(), a.sx, out);
+    for (int p = 0; p < count; p++)
+      gemv_xbf4_128_rows_npu(rows[p] + (size_t)common * row_bytes,
+                             ends[p] - begins[p] - common, k,
+                             a.xe.data(), a.xo.data(), a.tile_sums.data(), a.sx, out[p] + common);
+  });
+}
+
 // ---------------- GDN decode（linear_attn，照 qwen35moe/delta-net decode 数学） ----------------
 static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* xout) {
   if (getenv("TRACE")) fprintf(stderr, "gdn %d start\n", l);
@@ -286,8 +317,7 @@ static void gdn_decode(Model& m, int l, GdnState& st, const float* xin, float* x
   if (!env_flag("NPU_DECODE_PROJ")) {
     CpuXbf4Activation a(H);
     a.prepare(xn.data(), H);
-    cpu_mv_pretiled_fast(qw, a, qkv.data(), &m.pool, true);
-    cpu_mv_pretiled_fast(zw, a, z.data(), &m.pool, true);
+    cpu_mv_pretiled_fused_decode(fused_weights, fused_outputs, 2, a, m.pool);
     m.mv(m.T(LN(l, "linear_attn.in_proj_b.weight")), xn.data(), beta.data());
     m.mv(m.T(LN(l, "linear_attn.in_proj_a.weight")), xn.data(), alpha.data());
   } else if (m.npu && m.npu->ok && m.npu->gemv_fused(fused_weights, 2, xn.data(), fused_outputs)) {
@@ -406,9 +436,7 @@ static void attn_decode(Model& m, int l, AttnState& st, int pos, const float* xi
   if (!env_flag("NPU_DECODE_PROJ")) {
     CpuXbf4Activation a(H);
     a.prepare(xn.data(), H);
-    cpu_mv_pretiled_fast(qw, a, qg.data(), &m.pool, true);
-    cpu_mv_pretiled_fast(kw, a, kk.data(), &m.pool, true);
-    cpu_mv_pretiled_fast(vw, a, vv.data(), &m.pool, true);
+    cpu_mv_pretiled_fused_decode(fused_weights, fused_outputs, 3, a, m.pool);
   } else if (!env_flag("CPU_KV") && m.npu && m.npu->ok &&
       m.npu->gemv_fused(fused_weights, 3, xn.data(), fused_outputs,
                         env_flag_default("NPU_WIDE_ATTN") ? 12288 : 0)) {

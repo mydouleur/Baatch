@@ -175,6 +175,28 @@ static int run_case(int R, int C, std::mt19937& rng) {
         return 1;
       }
     }
+    const int multi_rows = R / 3;
+    const size_t row_bytes = (size_t)(C / 128) * 66;
+    const uint8_t* rows2[] = {w128.data(), w128.data() + row_bytes};
+    const uint8_t* rows3[] = {w128.data(), w128.data() + row_bytes, w128.data() + 2 * row_bytes};
+    std::vector<float> ym2(2 * multi_rows), ym3(3 * multi_rows);
+    float* out2[] = {ym2.data(), ym2.data() + multi_rows};
+    float* out3[] = {ym3.data(), ym3.data() + multi_rows, ym3.data() + 2 * multi_rows};
+    gemv_xbf4_128_multi_rows_npu<2>(rows2, multi_rows, C, xe.data(), xo.data(),
+                                    sums128.data(), sx, out2);
+    gemv_xbf4_128_multi_rows_npu<3>(rows3, multi_rows, C, xe.data(), xo.data(),
+                                    sums128.data(), sx, out3);
+    for (int p = 0; p < 2; p++)
+      if (memcmp(out2[p], y_npu.data() + p, multi_rows * sizeof(float)) != 0) {
+        printf("XBF4-128-MULTI-NPU P=2 projection=%d FAIL\n", p);
+        return 1;
+      }
+    for (int p = 0; p < 3; p++)
+      if (memcmp(out3[p], y_npu.data() + p, multi_rows * sizeof(float)) != 0) {
+        printf("XBF4-128-MULTI-NPU P=3 projection=%d FAIL\n", p);
+        return 1;
+      }
+    printf("XBF4-128-MULTI-NPU P=2/3 bitwise reference: PASS\n");
   }
   int bad = 0; float max_rel = 0;
   for (int r = 0; r < R; r++) {
