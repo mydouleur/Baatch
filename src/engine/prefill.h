@@ -39,9 +39,10 @@ static void check_m8_block(Model& m, int l, int t0, const char* kind,
 
 static int prefill_out_gemm_block() {
   const char* configured = getenv("PREFILL_OUT_GEMM");
-  if (!configured || !*configured || *configured == '0' || env_flag("NPU_OUT_PROJ")) return 0;
-  int block = atoi(configured);
-  if (block != 8 && block != 16) throw std::runtime_error("PREFILL_OUT_GEMM must be 8 or 16");
+  if (env_flag("NPU_OUT_PROJ")) return 0;
+  int block = configured && *configured ? atoi(configured) : 16;
+  if (!block) return 0;
+  if (block != 8 && block != 16) throw std::runtime_error("PREFILL_OUT_GEMM must be 0, 8 or 16");
   return block;
 }
 
@@ -94,10 +95,10 @@ static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, i
     m.nrm(m.T(LN(l, "input_layernorm.weight")), xin + t * H, H, xn.data() + t * H, true);
   const BaaTensor* weights[] = {&qw, &zw};
   const int output_strides[] = {QKV_DIM, VAL_DIM};
-  bool npu_proj = env_flag("NPU_PROJ") || env_flag("NPU_M8");
+  bool npu_proj = env_flag("NPU_PROJ") || env_flag_default("NPU_M8");
   for (int t = 0; t < T;) {
     float* outputs[] = {qkv.data() + (size_t)t * QKV_DIM, z.data() + (size_t)t * VAL_DIM};
-    if (t + 8 <= T && env_flag("NPU_M8") && m.npu && m.npu->ok &&
+    if (t + 8 <= T && env_flag_default("NPU_M8") && m.npu && m.npu->ok &&
         m.npu->gemv_fused_m8(weights, 2, xn.data() + (size_t)t * H, H, outputs, output_strides)) {
       if (env_flag("NPU_M8_CHECK"))
         check_m8_block(m, l, t, "gdn", weights, 2, xn.data() + (size_t)t * H,
@@ -220,12 +221,12 @@ static void attn_prefill_chunk(Model& m, int l, AttnState& st, int pos0,
     m.nrm(m.T(LN(l, "input_layernorm.weight")), xin + t * H, H, xn.data() + t * H, true);
   const BaaTensor* weights[] = {&qw, &kw, &vw};
   const int output_strides[] = {QPROJ, KVH * AHD, KVH * AHD};
-  bool npu_proj = env_flag("NPU_PROJ") || env_flag("NPU_M8");
+  bool npu_proj = env_flag("NPU_PROJ") || env_flag_default("NPU_M8");
   int wide = env_flag_default("NPU_WIDE_ATTN") ? 12288 : 0;
   for (int t = 0; t < T;) {
     float* outputs[] = {qg.data() + (size_t)t * QPROJ, kk.data() + (size_t)t * KVH * AHD,
                         vv.data() + (size_t)t * KVH * AHD};
-    if (t + 8 <= T && wide == 12288 && env_flag("NPU_M8") && m.npu && m.npu->ok &&
+    if (t + 8 <= T && wide == 12288 && env_flag_default("NPU_M8") && m.npu && m.npu->ok &&
         m.npu->gemv_fused_m8(weights, 3, xn.data() + (size_t)t * H, H, outputs, output_strides, wide)) {
       if (env_flag("NPU_M8_CHECK"))
         check_m8_block(m, l, t, "attn", weights, 3, xn.data() + (size_t)t * H,

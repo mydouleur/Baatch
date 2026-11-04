@@ -164,8 +164,8 @@ Backend：
 
 ### 10.3 v1 引擎分工（2026-10-26 实测修订）
 
-- **NPU**：prefill 末尾 lm_head；decode 旧 fused projection 由 `NPU_DECODE_PROJ=1` 保留对照，MTP 头后续再按总成本分发。prefill 大投影/out_proj 的 `NPU_PROJ=1`/`NPU_OUT_PROJ=1` 仅作对照。
-- **CPU（默认主路径）**：attention/GDN 大投影 decode、共享专家、XBF2 与 XBF4 routed experts、GDN 状态递推、embedding 查表、router/top-k、采样和 fallback；prefill 大投影与 out_proj 也默认走 AVX-512 CPU。decode 投影逐 128 通道块复现 NPU 的整数点积、BF16 最近偶数转换与累加语义，不用普通 FP32 CPU 结果替代数值验收。
+- **NPU**：prefill 末尾 lm_head，以及 K2048/N12288 fused 大投影的持久 M8 完整 8-token 块（默认 `NPU_M8=1`）；decode 旧 fused projection 由 `NPU_DECODE_PROJ=1` 保留对照，MTP 头后续再按总成本分发。`NPU_PROJ=1 NPU_M8=0` 与 `NPU_OUT_PROJ=1` 保留旧 M1 投影和 NPU out 对照。
+- **CPU（默认主路径）**：attention/GDN 大投影 decode、共享专家、XBF2 与 XBF4 routed experts、GDN 状态递推、embedding 查表、router/top-k、采样和 fallback；prefill MoE 默认 16-token 块，out_proj 默认 AVX-512 16 行 GEMM。decode 投影逐 128 通道块复现 NPU 的整数点积、BF16 最近偶数转换与累加语义，不用普通 FP32 CPU 结果替代数值验收。`NPU_M8=0 MOE_PREFILL_BLOCK=0 PREFILL_OUT_GEMM=0` 恢复旧 CPU/legacy prefill。
 - **禁止错误分流**：不得仅按专家/非专家机械分配；分发必须同时看 scheme、功耗、带宽、调用地板和同步成本。
 - **当前实现**：共享与 routed experts 默认 CPU；decode fused projections 已因实测总成本改到 CPU，旧 NPU 路径可对照。65+64 同二进制 A/B 的 NPU/CPU 平均 decode 为 65.37/53.82ms，64 个 OUT_IDS 一致。`--npu-xbf4-experts`、`NPU_SHARED_DOWN`、`NPU_OUT_PROJ` 仅保留为实验对照。量化噪声可能改变近并列路由及后续 greedy token，质量门另行验收。当前容器仍是朴素 absmax，XBF2 的 imatrix 质量版尚未落地。
 - 性能目标暂不写死：先完成正确分工与数值闭环，再测 NPU/CPU 并发带宽、同步成本和整机功耗。43/90+ tok/s 均为早期预算，不是实测结果；25ms/token 尚未达到。

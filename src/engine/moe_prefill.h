@@ -234,7 +234,10 @@ static void moe_prefill8(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace& w
 static void moe_prefill(Model& m, const MoeLayerPlan& p, MoePrefillWorkspace& w,
                         const float* xin, float* xout) {
   const char* configured = getenv("MOE_PREFILL_BLOCK");
-  if (configured && *configured) moe_prefill_blocks(m, p, w, xin, xout, atoi(configured));
-  else if (env_flag("MOE_PREFILL8")) moe_prefill8(m, p, w, xin, xout);
-  else moe_prefill_legacy(m, p, w, xin, xout);
+  if (configured && *configured) {
+    int block = atoi(configured);
+    if (block) moe_prefill_blocks(m, p, w, xin, xout, block);
+    else moe_prefill_legacy(m, p, w, xin, xout);
+  } else if (env_flag("MOE_PREFILL8")) moe_prefill8(m, p, w, xin, xout);
+  else moe_prefill_blocks(m, p, w, xin, xout, 16);
 }

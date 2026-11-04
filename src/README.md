@@ -4,7 +4,7 @@
 
 - XBF2/XBF4 routed experts 默认走 CPU；`--npu-xbf4-experts` 仅作实验对照。
 - 共享专家、routed experts 与 attention/GDN 大投影 decode 默认走两核 CPU；decode 投影复现 NPU 逐块 BF16 语义，`NPU_DECODE_PROJ=1` 保留旧 NPU 对照。lm_head 在 decode 默认走两核 CPU，在 prefill 末尾走 NPU。
-- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；prefill 大投影与 out_proj 也默认两核 CPU，`NPU_PROJ=1`/`NPU_OUT_PROJ=1` 保留对照。
+- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；prefill fused 大投影默认持久 NPU M8，MoE 默认 16-token 块，out_proj 默认两核 CPU 16 行 GEMM。`NPU_M8=0 MOE_PREFILL_BLOCK=0 PREFILL_OUT_GEMM=0` 恢复旧 CPU/legacy prefill；`NPU_PROJ=1 NPU_M8=0` 与 `NPU_OUT_PROJ=1` 保留 NPU 对照。
 - 同二进制 65+64 A/B：旧 NPU decode 平均 65.37ms、中位 62.0ms；默认 CPU decode 平均 53.82ms、中位 52.9ms，64 个 OUT_IDS 一致。25ms/token 尚未达到。
 
 规划结构（见 docs/M2_ARCH.md §3）：
@@ -131,26 +131,27 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   ERT timeout；M4/M8 主 Shape standalone 使用单个二维 ND A BD，未接入。M8 四个行对
   已共享每半 K 解包，三轮 1000 轮均值 1.527260→1.031075ms；持久 context 跨权重/
   激活及 BO 重建各 1000 轮全值 PASS，但高频整 Runner 重建仍有零块遗留风险。
-  M2 成对引擎实验的成对块损坏未在 standalone 复现，接入保持移除，默认保持 M1。
-- `NPU_M8=1` 仅将 K2048/N12288 prefill 的完整 8-token 块分发到持久 M8 context，尾 token 走 M1；
-  其他 Shape 保持原路径，默认 CPU projection 与旧 `NPU_PROJ=1` M1 对照不变。`NPU_M8_CHECK=1`
-  对每层每块直接计算同量化、同 BF16 块序 CPU reference。65/256-token 共 320/1280 块全值精确 PASS，
-  M8 与 M1 的 65+64 OUT_IDS 一致、0 flake；总 prefill 两轮分别快 5.05–7.09% 和 9.42–11.74%。
-  NPU 与默认 CPU 输出 IDs 不保证一致，因此仅保留实验开关。旧 M2 根因与高频 Runner 重建零块均未宣称修复。
+  M2 成对引擎实验的成对块损坏未在 standalone 复现，接入保持移除，不得借默认 M8 重启旧 M2。
+- 默认 `NPU_M8=1` 仅将 K2048/N12288 prefill 的完整 8-token 块分发到持久 M8 context，尾 token 走 M1；
+  其他 Shape 保持原路径，`NPU_M8=0` 回退 CPU projection，`NPU_PROJ=1 NPU_M8=0` 保留旧 M1 对照。
+  `NPU_M8_CHECK=1` 对每层每块直接计算同量化、同 BF16 块序 CPU reference。65/256-token 共
+  320/1280 块全值精确 PASS，M8 与 M1 的 65+64 OUT_IDS 一致、0 flake；总 prefill 两轮分别快
+  5.05–7.09% 和 9.42–11.74%。NPU 与 CPU/legacy 输出 IDs 不保证跨语义一致。旧 M2 根因与高频
+  Runner 重建零块均未宣称修复。
 - K2048/N2048 M8 standalone 已验证 1000 轮全值精确 PASS，暖态 0.325598ms vs M1×8
   1.518065ms（-78.552%）。out_proj 引擎实验将逻辑 K4096 拆成两个 K2048 半张量，独立量化、
   分别 BF16 后 FP32 相加；65/256 的逐层逐块同语义 CPU reference 全值精确 PASS，两轮 65+64
   候选各自 IDs 一致且 0 flake。但固定 256 严格 HEAD/候选两轮均值为 8121.85/9069.25ms
   （候选慢 11.66%），out 1529.172→2039.695ms，固定与变化 65 也分别慢约 2.97%/2.93%。
   无净收益，实验及 `NPU_M8_OUT` 已撤回；默认 CPU out 与原 N12288 M8 不变，未使用 K4096/N2048 M2。
-- `MOE_PREFILL_BLOCK=8/16/32/64` 启用 MoE token 块实验，`MOE_PREFILL8=1` 保留为 8 块别名；
-  块内先算完全部 router/top-k，再按 expert 聚合。XBF2/XBF4 的一次权重解包都服务块内全部行，
-  专家输出严格按原 top-k slot 0→7 归并。layer0/layer10 的自然、固定、随机路由与 65-token
-  尾块均和逐 token direct 逐位同哈希，GEMM 单测 PASS；这不等同于旧整段 expert 序，OUT_IDS
-  不保证相同，默认关闭，decode 调度与数学不变。固定 256-token 纯 CPU 选 8，M8 选 16；
-  32/64 因计算与缓存/写回成本退化而撤回。`MOE_PREFILL_STATS=1` 输出全 prompt 的 expert-run、
-  平均复用行数及 direct/packed 权重流量；`slot_out` 按块大小分配，8/16/32/64 分别占
-  0.524/1.049/2.097/4.194MB，默认路径不增长。
+- `MOE_PREFILL_BLOCK=8/16/32/64` 选择 MoE token 块，默认 16，`0` 恢复旧整段 expert 序，
+  `MOE_PREFILL8=1` 保留为 8 块别名；块内先算完全部 router/top-k，再按 expert 聚合。XBF2/XBF4
+  的一次权重解包都服务块内全部行，专家输出严格按原 top-k slot 0→7 归并。layer0/layer10 的
+  自然、固定、随机路由与 65-token 尾块均和逐 token direct 逐位同哈希，GEMM 单测 PASS；这不等同于
+  旧整段 expert 序，OUT_IDS 不保证相同，decode 调度与数学不变。固定 256-token 纯 CPU 选 8，M8
+  选 16；32/64 因计算与缓存/写回成本退化而撤回。`MOE_PREFILL_STATS=1` 输出全 prompt 的
+  expert-run、平均复用行数及 direct/packed 权重流量；`slot_out` 按块大小分配，8/16/32/64 分别占
+  0.524/1.049/2.097/4.194MB，默认 16 占 1.049MB，显式 `0` 的 legacy 路径不增长。
 - T>=16 且 expert-run M>=4 的 down 使用四行联合整数归约和 `[r][m]` 转置临时输出，
   消除 8KB 行跨距的缓存组冲突；逐行 block 累加与 slot 0→7 归并顺序不变，T=8 保持原路径。
   gather/hidden 拆分只处理当前 XBF scheme 所需格式。M=1..16 与转置 M=4..16 单测全值 PASS，
@@ -257,15 +258,23 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   50.4250→48.8250ms；MoE 15.9050→15.7825ms，但 GEMV 与系统漂移抵消分项收益。
   因无可复现总时延净收益，候选及新增单测全部撤回，默认实现不变。候选期 tests、layer0/layer10
   direct/scheduled 哈希及所有 OUT_IDS 一致，0 flake、无 timeout/reset；25ms/token 未达到。
-- 2026-11-05 prefill out_proj 增加非默认 `PREFILL_OUT_GEMM=8/16`：每个 64-token chunk 的 state
-  顺序不变，完整块按 K4096 整体量化，66B/128 块权重只解包一次并供 8/16 行 VNNI 复用；每个 token
-  保持原 128 块 FP32/BF16-scale 累加顺序和输出布局，尾 token 走原 GEMV，decode/NPU Shape/量化格式不变。
-  M=8/16 独立激活 direct reference 与真实 65/256-token 全部 out 块逐位 PASS，标准 tests 全 PASS。
-  固定 65 两轮 HEAD/16 行均值 2371.9→2235.6ms（27.40→29.07 tok/s），out 346.7→180.2ms；
-  固定 256 为 6565.4→6111.5ms（38.99→41.89 tok/s），out 1274.9→724.3ms；变化 65 为
-  2688.7→2471.1ms（24.18→26.30 tok/s），out 377.5→189.4ms。8 行固定 256 均值 6181.7ms、
-  out 579.0ms，也有净收益。全部两轮 0 flake，65+64 OUT_IDS 与 HEAD 一致；默认仍逐 token。
+- 2026-11-05 prefill out_proj 增加当时非默认的 `PREFILL_OUT_GEMM=8/16`：每个 64-token chunk 的
+  state 顺序不变，完整块按 K4096 整体量化，66B/128 块权重只解包一次并供 8/16 行 VNNI 复用；每个
+  token 保持原 128 块 FP32/BF16-scale 累加顺序和输出布局，尾 token 走原 GEMV，decode/NPU Shape/
+  量化格式不变。M=8/16 独立激活 direct reference 与真实 65/256-token 全部 out 块逐位 PASS，标准
+  tests 全 PASS。固定 65 两轮 HEAD/16 行均值 2371.9→2235.6ms（27.40→29.07 tok/s），out
+  346.7→180.2ms；固定 256 为 6565.4→6111.5ms（38.99→41.89 tok/s），out 1274.9→724.3ms；
+  变化 65 为 2688.7→2471.1ms（24.18→26.30 tok/s），out 377.5→189.4ms。8 行固定 256 均值
+  6181.7ms、out 579.0ms，也有净收益。全部两轮 0 flake，65+64 OUT_IDS 与 HEAD 一致。
 - 2026-11-05 XBF4 routed 原始 Shape M8 仅完成 standalone：K2048/N1024 与 K512/N2048 数值、
   6000 次持久 context 压力及 M1×M 对照闭合，但满 8 行全成本 CPU/M8 为 0.165656/5.485556ms，
   NPU 慢 33.11×。真实 8/16-token 块没有满 M8 expert-run，默认整段聚合也不改变结论。
   routed 继续 CPU，未接引擎，decode/MTP/XBF2/量化格式与两核不变。
+- 2026-11-05 生产化验收后将 `NPU_M8=1 MOE_PREFILL_BLOCK=16 PREFILL_OUT_GEMM=16` 转为默认。
+  固定、不同起点、变化 65 与非 8 倍数 67-token 的候选/旧 NPU M1 下一 token 和 64 个 OUT_IDS
+  全部一致，固定 256 下一 token 均为 5；真实 67/256-token 共 1600 个 M8 块、12960 个 out token
+  exact_mismatches=0。固定 256 三轮 legacy/候选均值为 10638.467/7270.100ms
+  （24.064/35.213 tok/s）；最终默认两轮 6966.500ms（36.747 tok/s），全 `0` 回退为
+  10846.0ms（23.603 tok/s）。两个干净 MSVC 构建的 tests 均 OVERALL PASS，28 次完整引擎运行
+  共 31548 次 NPU 调用、0 flake、0 timeout/reset。`NPU_M8=0 MOE_PREFILL_BLOCK=0
+  PREFILL_OUT_GEMM=0` 恢复旧 CPU/legacy prefill；默认 NPU 与 CPU/legacy IDs 不保证跨语义一致。

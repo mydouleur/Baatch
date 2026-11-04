@@ -160,7 +160,9 @@ K2048/N2048 也使用同一 persistent-context host 做了 1000 轮随机独立�
 
 ### 受限引擎接入（2026-10-26）
 
-引擎 `NPU_M8=1` 仅使用 K2048/N12288 资产，完整 8-token 块走持久 M8 Shape/run/BO，尾 token 走 M1；A 按 `[tile,m,k]` 打包，C 按 `[transfer,col,row,m,n]` 重排。`NPU_M8_CHECK=1` 在完整引擎内对每层每块直接计算 CPU NPU-semantics reference，而非复用 standalone 结论。65-token 320 块、256-token 1280 块均全值精确 PASS；M8 与 M1 的 65/256 下一 token 及两轮 65+64 OUT_IDS 一致，0 flake。相对当前 HEAD 默认 CPU projection 的两组总 prefill A/B：65-token 快 7.09%/5.05%，256-token 快 9.42%/11.74%。NPU 与默认 CPU 的输出 IDs 不保证一致，故默认不启用。旧 M2 成对块损坏的独立根因未据此宣称修复；高频整 Runner 重建仍有零块风险，禁止用重建规避。
+引擎 `NPU_M8=1` 仅使用 K2048/N12288 资产，完整 8-token 块走持久 M8 Shape/run/BO，尾 token 走 M1；A 按 `[tile,m,k]` 打包，C 按 `[transfer,col,row,m,n]` 重排。`NPU_M8_CHECK=1` 在完整引擎内对每层每块直接计算 CPU NPU-semantics reference，而非复用 standalone 结论。65-token 320 块、256-token 1280 块均全值精确 PASS；M8 与 M1 的 65/256 下一 token 及两轮 65+64 OUT_IDS 一致，0 flake。相对当时 HEAD 默认 CPU projection 的两组总 prefill A/B：65-token 快 7.09%/5.05%，256-token 快 9.42%/11.74%。NPU 与默认 CPU 的输出 IDs 不保证一致，故当时默认不启用。旧 M2 成对块损坏的独立根因未据此宣称修复；高频整 Runner 重建仍有零块风险，禁止用重建规避。
+
+2026-11-05 生产化复验后，`NPU_M8=1` 已与 `MOE_PREFILL_BLOCK=16`、`PREFILL_OUT_GEMM=16` 一起转为默认。固定、不同起点、变化 65 和非 8 倍数 67-token 的 M8/M1 下一 token 与 65+64 OUT_IDS 全部一致；真实 67/256-token 的 1600 个 M8 块及 12960 个 out token 全值精确 PASS，两批验收共 31548 次 NPU 调用 0 flake、0 timeout/reset。`NPU_M8=0 MOE_PREFILL_BLOCK=0 PREFILL_OUT_GEMM=0` 恢复旧 CPU/legacy prefill，`NPU_PROJ=1 NPU_M8=0` 保留同语义 M1 对照；NPU 与 CPU/legacy 仍不宣称跨数值语义一致。
 
 
 ### XBF4 routed 原始 Shape M8 standalone（2026-11-05）

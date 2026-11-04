@@ -4,7 +4,7 @@
 
 - XBF2/XBF4 routed experts 默认走 CPU；XBF4 的 NPU 路径仅留实验对照。
 - 共享专家、routed experts 与 attention/GDN 大投影 decode 默认走两核 CPU；decode 投影复现 NPU 逐块 BF16 语义，`NPU_DECODE_PROJ=1` 保留旧 NPU 对照。lm_head 在 decode 默认走两核 CPU，在 prefill 末尾走 NPU。
-- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；prefill 大投影与 out_proj 也默认两核 CPU，`NPU_PROJ=1`/`NPU_OUT_PROJ=1` 保留对照。
+- GDN 状态递推、embedding、router/top-k、采样和 fallback → CPU；prefill fused 大投影默认持久 NPU M8，MoE 默认 16-token 块，out_proj 默认两核 CPU 16 行 GEMM。`NPU_M8=0 MOE_PREFILL_BLOCK=0 PREFILL_OUT_GEMM=0` 恢复旧 CPU/legacy prefill；`NPU_PROJ=1 NPU_M8=0` 与 `NPU_OUT_PROJ=1` 保留对照。
 - 最终同二进制 65+64 A/B：旧 NPU decode 平均 65.37ms、中位 62.0ms、p95 74.10ms；默认 CPU decode 平均 53.82ms、中位 52.9ms、p95 57.18ms，64 个 OUT_IDS 一致，NPU 对照 2561 次调用 0 flake。25ms/token 尚未达到。
 
 ## 已完成
@@ -25,7 +25,7 @@
 2. **decode 单 token 分项优化**
    N12288 旧 NPU 路径实测投影约 31.27ms/token，默认已改为数值一致的 CPU 路径；65+64 同二进制 A/B 从平均 65.37ms 降至 53.82ms。后续 MoE 按专家两核连续执行并重叠 router/shared，固定输入三轮 MoE 为 16.127–16.490ms/token，总时延 53.011–53.489ms。继续依据 `PROF=1 PROF_DECODE=1` 的逐层数据优化 out_proj、GDN 与 lm_head；不得回退 insts 热换、多 context 或已挂起的 weight-ahead 双静态入口协议。
 3. **prefill M>1 与性能功耗基线**
-   旧 M2 成对引擎路径曾出现 hidden rel_l2=0.528，接入保持移除，根因未宣称修复。新 M8 仅以 `NPU_M8=1` 启用 K2048/N12288 持久 context 实验，尾 token 走 M1；65/256-token 逐层逐块 CPU 对拍全值精确 PASS，M8/M1 的 65+64 OUT_IDS 一致，且相对 CPU 默认总 prefill 有 5–12% 实测收益。NPU 与默认 CPU 输出 IDs 不保证一致，因此不设默认。继续按逐层成本优化 MoE/GEMM 与 decode，并建立功耗对照。
+   旧 M2 成对引擎路径曾出现 hidden rel_l2=0.528，接入保持移除，根因未宣称修复。默认 `NPU_M8=1` 仅启用 K2048/N12288 持久 context，尾 token 走 M1；多组真实 prompt 的逐层逐块 CPU 对拍、M8/M1 下一 token 与 65+64 OUT_IDS 已闭合，固定 256-token 同窗口相对 CPU/legacy 有明确收益。NPU 与 CPU/legacy 输出 IDs 不保证跨语义一致，`NPU_M8=0 MOE_PREFILL_BLOCK=0 PREFILL_OUT_GEMM=0` 保留兼容回退。继续建立性能与功耗对照，不重启旧 M2 或高频 Runner 重建路线。
 4. **MTP**
    实现 draft/verify/accept 与状态回滚，实测接受率和净加速。
 5. **量化质量**
