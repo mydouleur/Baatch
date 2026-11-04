@@ -41,6 +41,36 @@ static void gemv_xbf4_rows(const uint8_t* w, int row0, int nrows, int n_in,
   }
 }
 
+static void gemv_xbf4_rows_dual_acc(const uint8_t* w, int row0, int nrows, int n_in,
+                                    const int8_t* xe, const int8_t* xo,
+                                    const float* sumxq_sb, float sx, float* y) {
+  const int sb_per_row = n_in / XBF_SB;
+  const size_t row_bytes = (size_t)sb_per_row * 130;
+  for (int r = 0; r < nrows; r++) {
+    const uint8_t* rowp = w + (size_t)(row0 + r) * row_bytes;
+    float yr = 0.f;
+    for (int sb = 0; sb < sb_per_row; sb++) {
+      const uint8_t* wsb = rowp + sb * 130;
+      uint16_t scale_bits;
+      memcpy(&scale_bits, wsb, 2);
+      float scale = bf16_to_f32(scale_bits);
+      __m512i z0 = _mm512_loadu_si512(wsb + 2);
+      __m512i z1 = _mm512_loadu_si512(wsb + 66);
+      __m512i acc0 = _mm512_dpbusd_epi32(_mm512_setzero_si512(),
+          _mm512_and_si512(z0, XBF4_LO), _mm512_loadu_si512(xe + sb * 128));
+      __m512i acc1 = _mm512_dpbusd_epi32(_mm512_setzero_si512(),
+          _mm512_and_si512(_mm512_srli_epi16(z0, 4), XBF4_LO), _mm512_loadu_si512(xo + sb * 128));
+      acc0 = _mm512_dpbusd_epi32(acc0,
+          _mm512_and_si512(z1, XBF4_LO), _mm512_loadu_si512(xe + sb * 128 + 64));
+      acc1 = _mm512_dpbusd_epi32(acc1,
+          _mm512_and_si512(_mm512_srli_epi16(z1, 4), XBF4_LO), _mm512_loadu_si512(xo + sb * 128 + 64));
+      int isum = _mm512_reduce_add_epi32(_mm512_add_epi32(acc0, acc1));
+      yr += (float)(isum - 8 * (int)sumxq_sb[sb]) * sx * scale;
+    }
+    y[row0 + r] = yr;
+  }
+}
+
 static inline int dot_xbf4_128(const uint8_t* wb, const int8_t* xe, const int8_t* xo) {
   __m512i z = _mm512_loadu_si512(wb + 2);
   __m512i lo = _mm512_and_si512(z, XBF4_LO);

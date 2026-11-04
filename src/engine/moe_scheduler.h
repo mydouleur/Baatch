@@ -120,7 +120,7 @@ static void direct_routed(Model& m, DirectMoeWorkspace& w, DirectProfile* profil
     auto run_xbf4 = [&](const BaaTensor& t, int n_in, const int8_t* xe, const int8_t* xo,
                         const float* sum, float sx, float* y) {
       auto start = std::chrono::steady_clock::now();
-      gemv_xbf4_rows(t.data, 0, (int)t.shape[0], n_in, xe, xo, sum, sx, y);
+      gemv_xbf4_rows_dual_acc(t.data, 0, (int)t.shape[0], n_in, xe, xo, sum, sx, y);
       gemv_ms[id] += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() * 1e3;
     };
     auto run_xbf2 = [&](const BaaTensor& t, int n_in, const int8_t* const* q4,

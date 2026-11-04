@@ -69,6 +69,14 @@ static int run_case(int R, int C, std::mt19937& rng) {
       std::vector<int8_t> xe(C / 2), xo(C / 2), xe_m(MAX_M * C / 2), xo_m(MAX_M * C / 2);
       xq_split4(xq.data(), C, xe.data(), xo.data());
       gemv_xbf4_rows(w.data(), 0, R, C, xe.data(), xo.data(), sumxq.data(), sx, y.data());
+      if (M == 1) {
+        std::vector<float> ydual(R);
+        gemv_xbf4_rows_dual_acc(w.data(), 0, R, C, xe.data(), xo.data(), sumxq.data(), sx, ydual.data());
+        if (memcmp(y.data(), ydual.data(), R * sizeof(float)) != 0) {
+          printf("XBF4-DUAL-ACC bitwise FAIL\n");
+          return 1;
+        }
+      }
       for (int m = 0; m < MAX_M; m++) {
         memcpy(xe_m.data() + (size_t)m * C / 2, xe.data(), C / 2);
         memcpy(xo_m.data() + (size_t)m * C / 2, xo.data(), C / 2);
