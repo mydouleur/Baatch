@@ -278,3 +278,10 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   10846.0ms（23.603 tok/s）。两个干净 MSVC 构建的 tests 均 OVERALL PASS，28 次完整引擎运行
   共 31548 次 NPU 调用、0 flake、0 timeout/reset。`NPU_M8=0 MOE_PREFILL_BLOCK=0
   PREFILL_OUT_GEMM=0` 恢复旧 CPU/legacy prefill；默认 NPU 与 CPU/legacy IDs 不保证跨语义一致。
+- 2026-11-05 decode lm_head 分行并行仅完成原型并撤回：NPU 计算 vocab 前缀、两核 CPU 同语义
+  计算后缀，共享量化并在全量 logits 上 argmax。七档 NPU 行数均逐值 exact PASS，最佳 N131072
+  在紧循环全成本中位约 4.05ms，持久 context 996 暖态调用 0 flake；但固定 65+64 三轮完整
+  decode 默认/候选平均为 40.260/40.423ms，平均中位 39.733/39.833ms、平均 p95
+  42.267/45.367ms，无净收益。完整路径每次 NPU 提交与剩余等待合计约 1.49ms，抵消分行收益。
+  三轮 OUT_IDS 一致，候选 192 次 decode 调用 0 flake，tests PASS，无 timeout/reset。
+  `npu.h/main.cpp` 候选改动已撤回，默认仍为两核 CPU lm_head；其他部件与两核边界不变。
