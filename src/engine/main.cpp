@@ -207,8 +207,20 @@ int main(int argc, char** argv) { try {
       std::thread warmer([&] {
         SetThreadAffinityMask(GetCurrentThread(), 1ull << 0);
         try {
-          for (int l = 0; l < Cfg::NLAYERS; l++)
+          bool npu_proj = (env_flag("NPU_PROJ") || env_flag_default("NPU_M8")) && m.npu && m.npu->ok;
+          for (int l = 0; l < Cfg::NLAYERS; l++) {
+            if (npu_proj) {
+              if (m.is_gdn(l)) {
+                cpu_prepare_pretiled(m.T(LN(l, "linear_attn.in_proj_qkv.weight")));
+                cpu_prepare_pretiled(m.T(LN(l, "linear_attn.in_proj_z.weight")));
+              } else {
+                cpu_prepare_pretiled(m.T(LN(l, "self_attn.q_proj.weight")));
+                cpu_prepare_pretiled(m.T(LN(l, "self_attn.k_proj.weight")));
+                cpu_prepare_pretiled(m.T(LN(l, "self_attn.v_proj.weight")));
+              }
+            }
             cpu_prepare_pretiled(m.T(LN(l, m.is_gdn(l) ? "linear_attn.out_proj.weight" : "self_attn.o_proj.weight")));
+          }
           cpu_prepare_pretiled(lmh);
         } catch (...) {
           warm_error = std::current_exception();

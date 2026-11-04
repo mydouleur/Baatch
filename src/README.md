@@ -326,3 +326,10 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   冷/暖共 640 次调用 0 flake；本批共 3925 次 NPU 调用 0 flake、0 timeout/reset，NPU 最终健康。
   decode 25ms 与长 prompt 数千 tok/s 均未达到，不进入 MTP；旧 M2 根因、高频 Runner 重建零块、
   imatrix/PPL/任务质量仍未闭合。
+- 2026-11-05 修复默认 prefill 后首个 decode 的 fused projection 冷行缓存：NPU M8 prefill 时，既有后台
+  warmer 现在同时准备 GDN qkv/z 与 attention q/k/v 的 CPU 66B 行缓存，out/lm_head 预热不变，join 仍计入
+  prefill。8-token `PROF_DECODE` 的 proj 合计由 HEAD 527.979ms 降至 102.270ms，首 token 492.3→40.6ms；
+  没有剔除首个 decode 或改动其数学。固定 65+64 两轮 HEAD/候选首 token 为 499.8/484.7→39.5/39.5ms，
+  候选 decode 平均 39.277/40.356ms、中位 39.20/39.60ms、nearest-rank p95 40.80/42.40ms，prefill 为
+  2295.7/2522.7ms；四轮 OUT_IDS 完全一致，后续 token 无回退，每轮 361 次 NPU 调用 0 flake。
+  CPU legacy 不新增工作，全 0 legacy 与当前 HEAD 同窗口 IDs 一致；标准 tests `OVERALL PASS`，无 timeout/reset。
