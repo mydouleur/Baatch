@@ -250,3 +250,10 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   state 4.8106→4.7987ms，XBF4 GEMV 6.7942→6.7680ms；9/12 轮总时延、11/12 轮
   proj 下降。标准 tests 与 P=2/P=3 逐值 reference PASS，OUT_IDS 一致、0 flake，
   MoE、prefill、MTP、量化格式、GDN state 与两核边界均未改，无 timeout/reset。
+- 2026-11-05 decode MoE 非 GEMV 残差候选在同进程 40 层微基准中三轮均值
+  10.728633→10.365413ms（-3.386%）且逐位一致，组合为两核 router、shared 激活驻留复用与
+  128 块一次量化；router/shared 多行 pair/quad 无继续收益。完整 65+64 十二轮 HEAD/候选平均
+  45.8176→45.7819ms（-0.078%），仅 6/12 轮变快，平均中位 45.1458→45.2625ms、p95
+  50.4250→48.8250ms；MoE 15.9050→15.7825ms，但 GEMV 与系统漂移抵消分项收益。
+  因无可复现总时延净收益，候选及新增单测全部撤回，默认实现不变。候选期 tests、layer0/layer10
+  direct/scheduled 哈希及所有 OUT_IDS 一致，0 flake、无 timeout/reset；25ms/token 未达到。
