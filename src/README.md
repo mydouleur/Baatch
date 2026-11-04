@@ -285,3 +285,18 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   42.267/45.367ms，无净收益。完整路径每次 NPU 提交与剩余等待合计约 1.49ms，抵消分行收益。
   三轮 OUT_IDS 一致，候选 192 次 decode 调用 0 flake，tests PASS，无 timeout/reset。
   `npu.h/main.cpp` 候选改动已撤回，默认仍为两核 CPU lm_head；其他部件与两核边界不变。
+- 2026-11-05 decode SMT 仅评估两个物理核：Windows `GetLogicalProcessorInformationEx` 确认
+  Ryzen AI 9 H 365 为 10 核 20 线程，LP0/1、LP2/3、LP4/5、LP6/7 是四个高效核；
+  默认 scheduled decode 的 Pool 在主线程 LP1 与 worker LP2，实验仅为 out_proj/lm_head
+  增加 LP0/LP3，不启用 LP4 及之后的物理核。新增 worker 在非 SMT 任务时睡眠，逐行输出、
+  BF16 与归并顺序不变。三轮干净的真实权重同进程 50 轮微基准共 4953.6 万个输出逐位 PASS：
+  40 层 out 平均 3.763532→3.774023ms（45.971→45.844GB/s，耗时 +0.279%），lm_head
+  5.637356→5.574739ms（46.516→47.038GB/s，-1.111%），out 三轮均无净收益。
+  固定 65+64 十二轮 HEAD/候选平均总时延 55.3596→55.5740ms（+0.387%，
+  18.064→17.994 tok/s），中位 46.2583→46.6625ms、nearest-rank p95
+  52.5667→52.8250ms；proj 22.4404→22.5860ms、state 5.2249→5.2412ms、
+  out 4.5670→4.8504ms、MoE 16.5550→16.3486ms、lm_head 6.2883→6.2343ms。
+  仅 6/12 轮总时延下降，lm_head 小收益不能抵消 out 与尾延迟回退，未达到保留门槛。
+  所有 OUT_IDS 一致、0 flake，24 次完整运行无 timeout/reset；标准 tests 均 PASS。
+  原型条件变量唤醒问题已在性能复测前修复，`CPU_DECODE_SMT`、四逻辑线程 Pool 与调用端
+  改动随后全部撤回；默认仍两线程，prefill/MTP/量化格式/NPU 协议及 shared worker affinity 不变。
