@@ -270,6 +270,33 @@ static void cpu_mv_pretiled_fast(const BaaTensor& t, const float* x, float* y,
   cpu_mv_pretiled_fast(t, a, y, pool, npu_semantics);
 }
 
+static void cpu_gemm_pretiled_fast(const BaaTensor& t, const float* x, int input_stride,
+                                   int M, float* y, int output_stride, Pool& pool) {
+  int N = (int)t.shape[0], K = (int)t.shape[1];
+  const int blocks = K / 128;
+  std::vector<int8_t> q((size_t)M * K), xe((size_t)M * K / 2), xo((size_t)M * K / 2);
+  std::vector<float> sums((size_t)M * K / XBF_SB), sx(M);
+  std::vector<int> tile_sums((size_t)M * blocks);
+  for (int m = 0; m < M; m++) {
+    int8_t* qm = q.data() + (size_t)m * K;
+    sx[m] = quant_xq(x + (size_t)m * input_stride, K, qm,
+                     sums.data() + (size_t)m * K / XBF_SB);
+    xq_split4(qm, K, xe.data() + (size_t)m * K / 2, xo.data() + (size_t)m * K / 2);
+    for (int b = 0; b < blocks; b++) {
+      int sum = 0;
+      for (int i = 0; i < 128; i++) sum += qm[b * 128 + i];
+      tile_sums[m * blocks + b] = sum;
+    }
+  }
+  cpu_prepare_pretiled(t);
+  size_t row_bytes = (size_t)blocks * 66;
+  pool.run([&](int id) {
+    int begin = N * id / 2, end = N * (id + 1) / 2;
+    gemm_xbf4_128_rows(t.cpu_rows.data() + (size_t)begin * row_bytes, end - begin, K,
+                       M, output_stride, xe.data(), xo.data(), tile_sums.data(), sx.data(), y + begin);
+  });
+}
+
 static void cpu_mv_pretiled_fused_decode(const BaaTensor* const* weights, float* const* outputs,
                                          int count, const CpuXbf4Activation& a, Pool& pool) {
   for (int p = 0; p < count; p++) cpu_prepare_pretiled(*weights[p]);

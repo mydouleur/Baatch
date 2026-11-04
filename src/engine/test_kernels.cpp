@@ -197,6 +197,39 @@ static int run_case(int R, int C, std::mt19937& rng) {
         return 1;
       }
     printf("XBF4-128-MULTI-NPU P=2/3 bitwise reference: PASS\n");
+
+    std::vector<int8_t> xe_multi(MAX_M * C / 2), xo_multi(MAX_M * C / 2);
+    std::vector<int> sums_multi(MAX_M * C / 128);
+    std::vector<float> sx_multi(MAX_M), ref_multi((size_t)MAX_M * R), got_multi((size_t)MAX_M * R);
+    std::uniform_int_distribution<int> qdist(-127, 127);
+    for (int m = 0; m < MAX_M; m++) {
+      std::vector<int8_t> xqm(C);
+      for (int8_t& v : xqm) v = (int8_t)qdist(rng);
+      xq_split4(xqm.data(), C, xe_multi.data() + (size_t)m * C / 2,
+                xo_multi.data() + (size_t)m * C / 2);
+      for (int b = 0; b < C / 128; b++) {
+        int sum = 0;
+        for (int i = 0; i < 128; i++) sum += xqm[b * 128 + i];
+        sums_multi[m * (C / 128) + b] = sum;
+      }
+      sx_multi[m] = 0.0009765625f * (m + 1);
+      gemv_xbf4_128_rows(w128.data(), R, C, xe_multi.data() + (size_t)m * C / 2,
+                         xo_multi.data() + (size_t)m * C / 2,
+                         sums_multi.data() + (size_t)m * C / 128, sx_multi[m],
+                         ref_multi.data() + (size_t)m * R);
+    }
+    for (int M : {8, 16}) {
+      gemm_xbf4_128_rows(w128.data(), R, C, M, R, xe_multi.data(), xo_multi.data(),
+                         sums_multi.data(), sx_multi.data(), got_multi.data());
+      for (int m = 0; m < M; m++) {
+        if (memcmp(got_multi.data() + (size_t)m * R, ref_multi.data() + (size_t)m * R,
+                   R * sizeof(float)) != 0) {
+          printf("XBF4-128-GEMM M=%d row=%d direct bitwise FAIL\n", M, m);
+          return 1;
+        }
+      }
+    }
+    printf("XBF4-128-GEMM M=8/16 direct bitwise reference: PASS\n");
   }
   int bad = 0; float max_rel = 0;
   for (int r = 0; r < R; r++) {

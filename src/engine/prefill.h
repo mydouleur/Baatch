@@ -37,6 +37,52 @@ static void check_m8_block(Model& m, int l, int t0, const char* kind,
   }
 }
 
+static int prefill_out_gemm_block() {
+  const char* configured = getenv("PREFILL_OUT_GEMM");
+  if (!configured || !*configured || *configured == '0' || env_flag("NPU_OUT_PROJ")) return 0;
+  int block = atoi(configured);
+  if (block != 8 && block != 16) throw std::runtime_error("PREFILL_OUT_GEMM must be 8 or 16");
+  return block;
+}
+
+static void prefill_out_gemm(Model& m, int l, const char* kind, const BaaTensor& weight,
+                             const float* x, const float* xin, float* xout, int T, int block) {
+  std::vector<float> dec((size_t)T * Cfg::H);
+  size_t mismatches = 0;
+  for (int t = 0; t < T;) {
+    auto pt = prof_now();
+    int count = std::min(block, T - t);
+    if (count == block) {
+      cpu_gemm_pretiled_fast(weight, x + (size_t)t * Cfg::VAL_DIM, Cfg::VAL_DIM,
+                             count, dec.data() + (size_t)t * Cfg::H, Cfg::H, m.pool);
+      if (env_flag("PREFILL_OUT_GEMM_CHECK")) {
+        for (int u = 0; u < count; u++) {
+          std::vector<float> ref(Cfg::H);
+          cpu_mv_pretiled_fast(weight, x + (size_t)(t + u) * Cfg::VAL_DIM, ref.data());
+          for (int i = 0; i < Cfg::H; i++)
+            mismatches += dec[(size_t)(t + u) * Cfg::H + i] != ref[i];
+        }
+      }
+    } else {
+      for (int u = 0; u < count; u++)
+        m.mv_out_prefill(weight, x + (size_t)(t + u) * Cfg::VAL_DIM,
+                         dec.data() + (size_t)(t + u) * Cfg::H);
+    }
+    for (int u = 0; u < count; u++)
+      for (int i = 0; i < Cfg::H; i++) {
+        size_t at = (size_t)(t + u) * Cfg::H + i;
+        xout[at] = xin[at] + dec[at];
+      }
+    prof_add((m.is_gdn(l) ? g_prof.gdn_out[l] : g_prof.attn_out[l]), pt);
+    t += count;
+  }
+  if (env_flag("PREFILL_OUT_GEMM_CHECK")) {
+    fprintf(stderr, "[out-gemm-check] layer=%d kind=%s block=%d tokens=%d exact_mismatches=%zu %s\n",
+            l, kind, block, T, mismatches, mismatches ? "FAIL" : "PASS");
+    if (mismatches) throw std::runtime_error("prefill out GEMM mismatch");
+  }
+}
+
 static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, int T, float* xout) {
   using namespace Cfg;
   std::vector<float> xn(T * H), qkv(T * QKV_DIM), z(T * VAL_DIM);
@@ -85,7 +131,8 @@ static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, i
   const float* a_log = m.T(LN(l, "linear_attn.A_log")).f32();
   const float* cw = m.T(LN(l, "linear_attn.conv1d.weight")).f32();
   const float* nw = m.T(LN(l, "linear_attn.norm.weight")).f32();
-  std::vector<float> qc(QKV_DIM), o(VAL_DIM), og(VAL_DIM), dec(H), cwt(4 * QKV_DIM);
+  int out_block = prefill_out_gemm_block();
+  std::vector<float> qc(QKV_DIM), o(VAL_DIM), og((out_block ? T : 1) * VAL_DIM), dec(H), cwt(4 * QKV_DIM);
   for (int tap = 0; tap < 4; tap++)
     for (int c = 0; c < QKV_DIM; c++) cwt[tap * QKV_DIM + c] = cw[c * 4 + tap];
   for (int t = 0; t < T; t++) {
@@ -131,21 +178,27 @@ static void gdn_prefill_chunk(Model& m, int l, GdnState& st, const float* xin, i
     m.pool.run([&](int id) { run_heads(id * VH / 2, (id + 1) * VH / 2); });
     prof_add(g_prof.gdn_recur[l], st0); st0 = prof_now();
 
+    float* og_t = og.data() + (out_block ? (size_t)t * VAL_DIM : 0);
     m.pool.run([&](int id) {
       for (int j = id * VH / 2; j < (id + 1) * VH / 2; j++) {
         float* p = o.data() + j * HD;
         float ss = 0;
         for (int i = 0; i < HD; i++) ss += p[i] * p[i];
         float inv = 1.f / sqrtf(ss / HD + EPS);
-        gdn_output_norm_prefill<HD>(p, z.data() + t * VAL_DIM + j * HD, nw, inv, og.data() + j * HD);
+        gdn_output_norm_prefill<HD>(p, z.data() + t * VAL_DIM + j * HD, nw, inv, og_t + j * HD);
       }
     });
     prof_add(g_prof.gdn_norm[l], st0);
     prof_add(g_prof.gdn_state[l], pt); pt = prof_now();
-    m.mv_out_prefill(m.T(LN(l, "linear_attn.out_proj.weight")), og.data(), dec.data());
-    prof_add(g_prof.gdn_out[l], pt); pt = prof_now();
-    for (int i = 0; i < H; i++) xout[t * H + i] = xin[t * H + i] + dec[i];
+    if (!out_block) {
+      m.mv_out_prefill(m.T(LN(l, "linear_attn.out_proj.weight")), og.data(), dec.data());
+      prof_add(g_prof.gdn_out[l], pt); pt = prof_now();
+      for (int i = 0; i < H; i++) xout[t * H + i] = xin[t * H + i] + dec[i];
+    }
   }
+  if (out_block)
+    prefill_out_gemm(m, l, "gdn", m.T(LN(l, "linear_attn.out_proj.weight")),
+                     og.data(), xin, xout, T, out_block);
 }
 
 static void gdn_prefill(Model& m, int l, GdnState& st, const float* xin, int T, float* xout) {
@@ -243,11 +296,13 @@ static void attn_prefill_chunk(Model& m, int l, AttnState& st, int pos0,
   }
   st.len += T;
 
-  std::vector<float> attn(QH * AHD), dec(H);
+  int out_block = prefill_out_gemm_block();
+  std::vector<float> attn((out_block ? T : 1) * QH * AHD), dec(H);
   std::vector<float> sc0(pos0 + T), sc1(pos0 + T);
   double qk_ms[2]{}, softmax_ms[2]{}, pv_ms[2]{}, gate_ms[2]{};
   for (int t = 0; t < T; t++) {
-    std::fill(attn.begin(), attn.end(), 0.f);
+    float* attn_t = attn.data() + (out_block ? (size_t)t * QH * AHD : 0);
+    std::fill(attn_t, attn_t + QH * AHD, 0.f);
     const float* q = qg.data() + t * QPROJ;
     int len = pos0 + t + 1;
     auto run_heads = [&](int id, int begin, int end) {
@@ -262,19 +317,24 @@ static void attn_prefill_chunk(Model& m, int l, AttnState& st, int pos0,
         for (int p = 0; p < len; p++) { sc[p] = expf(sc[p] - mx); sum += sc[p]; }
         prof_add(softmax_ms[id], ht); ht = prof_now();
         attn_pv_prefill<AHD>(st.v.data() + kvh * AHD, len, KVH * AHD, sc.data(), sum,
-                             attn.data() + h * AHD);
+                             attn_t + h * AHD);
         prof_add(pv_ms[id], ht); ht = prof_now();
         const float* gate = q + h * 2 * AHD + AHD;
-        for (int i = 0; i < AHD; i++) attn[h * AHD + i] *= sigmoidf(gate[i]);
+        for (int i = 0; i < AHD; i++) attn_t[h * AHD + i] *= sigmoidf(gate[i]);
         prof_add(gate_ms[id], ht);
       }
     };
     m.pool.run([&](int id) { run_heads(id, id * QH / 2, (id + 1) * QH / 2); });
     prof_add(g_prof.attn_state[l], pt); pt = prof_now();
-    m.mv_out_prefill(m.T(LN(l, "self_attn.o_proj.weight")), attn.data(), dec.data());
-    prof_add(g_prof.attn_out[l], pt); pt = prof_now();
-    for (int i = 0; i < H; i++) xout[t * H + i] = xin[t * H + i] + dec[i];
+    if (!out_block) {
+      m.mv_out_prefill(m.T(LN(l, "self_attn.o_proj.weight")), attn.data(), dec.data());
+      prof_add(g_prof.attn_out[l], pt); pt = prof_now();
+      for (int i = 0; i < H; i++) xout[t * H + i] = xin[t * H + i] + dec[i];
+    }
   }
+  if (out_block)
+    prefill_out_gemm(m, l, "attn", m.T(LN(l, "self_attn.o_proj.weight")),
+                     attn.data(), xin, xout, T, out_block);
   g_prof.attn_qk[l] += (qk_ms[0] + qk_ms[1]) * 0.5;
   g_prof.attn_softmax[l] += (softmax_ms[0] + softmax_ms[1]) * 0.5;
   g_prof.attn_pv[l] += (pv_ms[0] + pv_ms[1]) * 0.5;

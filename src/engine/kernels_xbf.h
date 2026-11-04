@@ -100,6 +100,33 @@ static void gemv_xbf4_128_rows(const uint8_t* w, int nrows, int n_in,
   }
 }
 
+static void gemm_xbf4_128_rows(const uint8_t* w, int nrows, int n_in, int M, int output_stride,
+                               const int8_t* xe, const int8_t* xo,
+                               const int* sumxq, const float* sx, float* y) {
+  const int blocks = n_in / 128;
+  const size_t row_bytes = (size_t)blocks * 66;
+  for (int r = 0; r < nrows; r++) {
+    const uint8_t* row = w + (size_t)r * row_bytes;
+    float yr[16] = {};
+    for (int b = 0; b < blocks; b++) {
+      const uint8_t* wb = row + b * 66;
+      float scale = bf16_to_f32(wb[0] | (wb[1] << 8));
+      __m512i z = _mm512_loadu_si512(wb + 2);
+      __m512i lo = _mm512_and_si512(z, XBF4_LO);
+      __m512i hi = _mm512_and_si512(_mm512_srli_epi16(z, 4), XBF4_LO);
+      for (int m = 0; m < M; m++) {
+        const int8_t* xeb = xe + (size_t)m * n_in / 2 + b * 64;
+        const int8_t* xob = xo + (size_t)m * n_in / 2 + b * 64;
+        __m512i acc = _mm512_dpbusd_epi32(_mm512_setzero_si512(), lo, _mm512_loadu_si512(xeb));
+        acc = _mm512_dpbusd_epi32(acc, hi, _mm512_loadu_si512(xob));
+        int isum = _mm512_reduce_add_epi32(acc) - 8 * sumxq[m * blocks + b];
+        yr[m] += isum * sx[m] * scale;
+      }
+    }
+    for (int m = 0; m < M; m++) y[(size_t)m * output_stride + r] = yr[m];
+  }
+}
+
 static void gemv_xbf4_128_rows_npu(const uint8_t* w, int nrows, int n_in,
                                    const int8_t* xe, const int8_t* xo,
                                    const int* sumxq, float sx, float* y) {

@@ -257,3 +257,11 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   50.4250→48.8250ms；MoE 15.9050→15.7825ms，但 GEMV 与系统漂移抵消分项收益。
   因无可复现总时延净收益，候选及新增单测全部撤回，默认实现不变。候选期 tests、layer0/layer10
   direct/scheduled 哈希及所有 OUT_IDS 一致，0 flake、无 timeout/reset；25ms/token 未达到。
+- 2026-11-05 prefill out_proj 增加非默认 `PREFILL_OUT_GEMM=8/16`：每个 64-token chunk 的 state
+  顺序不变，完整块按 K4096 整体量化，66B/128 块权重只解包一次并供 8/16 行 VNNI 复用；每个 token
+  保持原 128 块 FP32/BF16-scale 累加顺序和输出布局，尾 token 走原 GEMV，decode/NPU Shape/量化格式不变。
+  M=8/16 独立激活 direct reference 与真实 65/256-token 全部 out 块逐位 PASS，标准 tests 全 PASS。
+  固定 65 两轮 HEAD/16 行均值 2371.9→2235.6ms（27.40→29.07 tok/s），out 346.7→180.2ms；
+  固定 256 为 6565.4→6111.5ms（38.99→41.89 tok/s），out 1274.9→724.3ms；变化 65 为
+  2688.7→2471.1ms（24.18→26.30 tok/s），out 377.5→189.4ms。8 行固定 256 均值 6181.7ms、
+  out 579.0ms，也有净收益。全部两轮 0 flake，65+64 OUT_IDS 与 HEAD 一致；默认仍逐 token。
