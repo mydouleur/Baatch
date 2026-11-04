@@ -265,3 +265,7 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   固定 256 为 6565.4→6111.5ms（38.99→41.89 tok/s），out 1274.9→724.3ms；变化 65 为
   2688.7→2471.1ms（24.18→26.30 tok/s），out 377.5→189.4ms。8 行固定 256 均值 6181.7ms、
   out 579.0ms，也有净收益。全部两轮 0 flake，65+64 OUT_IDS 与 HEAD 一致；默认仍逐 token。
+- 2026-11-05 XBF4 routed 原始 Shape M8 仅完成 standalone：K2048/N1024 与 K512/N2048 数值、
+  6000 次持久 context 压力及 M1×M 对照闭合，但满 8 行全成本 CPU/M8 为 0.165656/5.485556ms，
+  NPU 慢 33.11×。真实 8/16-token 块没有满 M8 expert-run，默认整段聚合也不改变结论。
+  routed 继续 CPU，未接引擎，decode/MTP/XBF2/量化格式与两核不变。

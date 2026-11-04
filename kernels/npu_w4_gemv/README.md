@@ -161,3 +161,31 @@ K2048/N2048 也使用同一 persistent-context host 做了 1000 轮随机独立�
 ### 受限引擎接入（2026-10-26）
 
 引擎 `NPU_M8=1` 仅使用 K2048/N12288 资产，完整 8-token 块走持久 M8 Shape/run/BO，尾 token 走 M1；A 按 `[tile,m,k]` 打包，C 按 `[transfer,col,row,m,n]` 重排。`NPU_M8_CHECK=1` 在完整引擎内对每层每块直接计算 CPU NPU-semantics reference，而非复用 standalone 结论。65-token 320 块、256-token 1280 块均全值精确 PASS；M8 与 M1 的 65/256 下一 token 及两轮 65+64 OUT_IDS 一致，0 flake。相对当前 HEAD 默认 CPU projection 的两组总 prefill A/B：65-token 快 7.09%/5.05%，256-token 快 9.42%/11.74%。NPU 与默认 CPU 的输出 IDs 不保证一致，故默认不启用。旧 M2 成对块损坏的独立根因未据此宣称修复；高频整 Runner 重建仍有零块风险，禁止用重建规避。
+
+
+### XBF4 routed 原始 Shape M8 standalone（2026-11-05）
+
+本原型只覆盖 gate_up K2048/N1024 与 down K512/N2048，不接引擎。真实 `gate_up` 为 gate/up 各 512、合计 N1024，所以每个 expert-run 只有一次 N1024 和一次 N2048 调用，没有第二个 N1024 半张量调用。N1024 使用两个 AIE core row，B BO 为 1,114,112B，不再补到 N2048；down B BO 为 557,056B。M>=4 的二维 ND A BD、FIFO 深度 8 和 M8 共享解包保持原实现，M1/M2 数据流未改。生成器/host 的 C 布局同步泛化为 `[transfer,col,row,m,n]`；`build_m2.sh` 新增 `OUT/AIEENV/XCLBINUTIL` 覆盖便于隔离构建。
+
+`gen_data_i8.py --expert-xbf4` 生成模型一致的 zp=8、256 权重一个 scale，同时输出 NPU tiled 与 CPU row-major 权重。`test_expert_m8.cpp` 复用现行两核 `gemm_xbf4_rows`，M>=4 的 down 使用 T>=16 的四行联合归约路径。CPU 和 NPU 分别对未计时直接 reference 逐位验证：CPU 为 256 块 FP32 顺序，NPU 为 128 块整数点积→BF16 最近偶数→FP32 块序。NPU per-run 计时包括量化、A 打包和输入 BO sync、run 创建/提交/wait、输出 BO sync/重排、SwiGLU、down 再量化；持久 context/权重 BO setup 单列。预平铺权重作为输入，row-major→tiled 转换不在 per-run 或 setup 内，因此结果是偏有利于 NPU 的常驻权重成本。
+
+原始 Shape 的随机/常数独立行各 20 轮均逐值 exact PASS。暖态 995 轮、每轮逐值 exact PASS：
+
+| Shape | M1×8 ms | M8 ms | M8 相对 M1×8 | M1×8 / M8 权重字节 |
+|---|---:|---:|---:|---:|
+| K2048/N1024 | 1.228093 | 0.235619 | -80.814% | 8,912,896 / 1,114,112 |
+| K512/N2048 | 0.938478 | 0.144546 | -84.598% | 4,456,448 / 557,056 |
+
+两组权重×两组激活在持久 context 下，BO 复用、每次换权重 BO、每次换 A/B BO 各 1000 轮，两 Shape 合计 6000 次调用全部 exact PASS、0 flake。最终完整 expert-run 50 轮也全部逐位 exact PASS；M8 与当前 CPU 的 rel_l2=0.0144788 是数值语义差异，不替代上述同语义 reference。最终全成本（暖态 45 轮平均）：
+
+| M=8 expert-run | 平均 ms | 每行 ms | 物理权重字节 | 相对 CPU |
+|---|---:|---:|---:|---:|
+| 两核 CPU 多行 | 0.165656 | 0.020707 | 1,597,440 | — |
+| NPU M1×8 | 7.193138 | 0.899142 | 13,369,344 | 慢 43.42× |
+| NPU M8 | 5.485556 | 0.685694 | 1,671,168 | 慢 33.11× |
+
+M8 比 M1×8 快 23.739%，但远低于 CPU；context/权重 BO setup 为 49.9681ms。单 Shape kernel 合计仅约 0.380ms，完整链路的 gate/down Shape 交替成本占主导。M=1 时 CPU/NPU 为 0.027996/5.331587ms。即使按最有利的满 8 行且不计权重转换，仍无净收益。
+
+真实 layer0、256-token 路由的行数分布进一步限制适用范围：8 块有 1789 runs、平均 1.144774 行、Mmax=4；16 块有 1560 runs、平均 1.312821 行、Mmax=5，二者均没有 M8 调用。64 块为 825 runs、平均 2.482424 行，仅 6 个 M8 调用。默认整段聚合为 253 runs、平均 8.094862 行，理论上有 149 个 M8 调用、覆盖 1192/2048 行，但上述满 M8 全成本已否定收益。
+
+诊断期新编 K512/N2048 M1 控件曾在常数行 20 轮中出现一轮 1056 值零块；其 insts 与既有稳定资产逐字节相同，但 PDI 不同。该问题不属于 M8，未靠 Runner 重建掩盖。最终 down M1 对照固定使用既有稳定资产，800 次常数行及 1000 轮随机对照均 PASS；M8 的所有最终数值、压力和性能轮 0 flake。全批无 ERT timeout/reset。默认仍为 CPU routed experts，XBF2/decode/MTP/量化格式/两核均不变，本原型不值得引擎接入。

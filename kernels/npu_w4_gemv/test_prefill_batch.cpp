@@ -91,12 +91,14 @@ public:
 };
 
 static size_t native_ref_index(size_t n, size_t m, size_t N, size_t M) {
-  size_t transfer = n / 2048;
-  size_t within = n % 2048;
+  size_t rows = N == 1024 ? 2 : 4;
+  size_t transfer_span = rows * 512;
+  size_t transfer = n / transfer_span;
+  size_t within = n % transfer_span;
   size_t row = within / 512;
   size_t col = (within % 512) / 64;
   size_t lane = n % 64;
-  return (((transfer * 8 + col) * 4 + row) * M + m) * 64 + lane;
+  return (((transfer * 8 + col) * rows + row) * M + m) * 64 + lane;
 }
 
 static void check_value(uint16_t actual_bits, float expected, size_t index,

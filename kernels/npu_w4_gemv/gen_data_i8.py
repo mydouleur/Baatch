@@ -42,6 +42,8 @@ def main():
     ap.add_argument("--pattern", default=None)
     ap.add_argument("--independent-rows", action="store_true")
     ap.add_argument("--activation", help="reuse packed A from another generated dataset")
+    ap.add_argument("--expert-xbf4", action="store_true",
+                    help="use model-compatible zp=8/256-weight scales and emit b_rowmajor.bin")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     K = a.size
@@ -143,16 +145,18 @@ def main():
         S = np.ones((ng, N), dtype=np.float32); S_bf = f32_to_bf16_u16(S); S_f = S
         Z = np.full((ng, N), 8, dtype=np.uint8)
 
+    if a.expert_xbf4:
+        if a.pattern:
+            ap.error("--expert-xbf4 cannot be combined with --pattern")
+        Z = np.full((ng, N), 8, dtype=np.uint8)
+        S = np.repeat(S[::2], 2, axis=0)
+        S_bf = f32_to_bf16_u16(S)
+        S_f = bf16_u16_to_f32(S_bf).astype(np.float64)
+
     # ---- 参考：逐 tile 整数精确 acc，再按 kernel 输出链（bf16 量化 acc -> x S -> 累加）----
     # kernel: prod = bf16(acc) * S (accfloat), c = bf16(c + prod)
-    logical_N = N
-    physical_N = (N + 2047) // 2048 * 2048
-    if physical_N != N:
-        W = np.pad(W, ((0, 0), (0, physical_N - N)), constant_values=8)
-        S = np.pad(S, ((0, 0), (0, physical_N - N)), constant_values=0)
-        S_bf = f32_to_bf16_u16(S); S_f = bf16_u16_to_f32(S_bf)
-        Z = np.pad(Z, ((0, 0), (0, physical_N - N)), constant_values=8)
-        N = physical_N
+    if N != 1024 and N % 2048:
+        ap.error("N must be 1024 or a multiple of 2048")
 
     if a.independent_rows:
         if a.pattern:
@@ -181,11 +185,13 @@ def main():
             C[m] = bf16_u16_to_f32(f32_to_bf16_u16((C[m] + prod).astype(np.float32))).astype(np.float64)
     if M > 1:
         native = np.empty(M * N, dtype=np.float64)
-        for tr in range(N // 2048):
+        rows = 2 if N == 1024 else 4
+        transfer_span = rows * 512
+        for tr in range(N // transfer_span):
             for col in range(8):
-                for row in range(4):
-                    dst = (((tr * 8 + col) * 4 + row) * M) * 64
-                    src = tr * 2048 + row * 512 + col * 64
+                for row in range(rows):
+                    dst = (((tr * 8 + col) * rows + row) * M) * 64
+                    src = tr * transfer_span + row * 512 + col * 64
                     native[dst:dst + M * 64] = C[:, src:src + 64].reshape(-1)
         native.astype(np.float32).tofile(os.path.join(a.out, "c_ref.bin"))
     else:
@@ -217,6 +223,13 @@ def main():
                 idx += 1
 
     B.reshape(-1).tofile(os.path.join(a.out, "b_packed.bin"))
+    if a.expert_xbf4:
+        rowmajor = np.zeros((N, ng // 2, 130), dtype=np.uint8)
+        scales = S_bf[::2].T.copy().view(np.uint8).reshape(N, ng // 2, 2)
+        rowmajor[:, :, :2] = scales
+        wt = W.T.reshape(N, K)
+        rowmajor[:, :, 2:] = (wt[:, 0::2] | (wt[:, 1::2] << 4)).reshape(N, ng // 2, 128)
+        rowmajor.reshape(-1).tofile(os.path.join(a.out, "b_rowmajor.bin"))
     print(f"K={K} N={N} -> {a.out}/  B={B.size}B ({B.size/1048576:.1f}MB) tiles={idx}")
 
 if __name__ == "__main__":

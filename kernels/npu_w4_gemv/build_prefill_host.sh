@@ -14,3 +14,7 @@ cl -nologo -EHsc -O2 -std:c++17 -Zc:__cplusplus \
   -ID:/xdna_llm/m0/probe/xrt_src/src/runtime_src/core/include \
   test_prefill_stress.cpp D:/xdna_llm/m0/probe/xrt_coreutil.lib \
   -Fo:"$OUT_W\\test_prefill_stress.obj" -Fe:"$OUT_W\\test_prefill_stress.exe"
+cl -nologo -EHsc -O2 -std:c++17 -Zc:__cplusplus -arch:AVX512 \
+  -ID:/xdna_llm/m0/probe/xrt_src/src/runtime_src/core/include \
+  test_expert_m8.cpp D:/xdna_llm/m0/probe/xrt_coreutil.lib \
+  -Fo:"$OUT_W\\test_expert_m8.obj" -Fe:"$OUT_W\\test_expert_m8.exe"

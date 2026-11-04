@@ -29,7 +29,9 @@ def my_matmul(dev, N, K, M=1):
     n = 64
     new_n = n // 2 + 2
     n_cols = 8
-    n_rows = 4
+    if N != 1024 and N % 2048:
+        raise ValueError("N must be 1024 or a multiple of 2048")
+    n_rows = 2 if N == 1024 else 4
 
     A_sz = M * K
     B_sz = K * N // 2 + K * N // n * 2
