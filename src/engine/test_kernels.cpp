@@ -222,13 +222,13 @@ static int test_attn_pv_prefill(std::mt19937& rng) {
 static int test_gdn_recur_prefill(std::mt19937& rng) {
   constexpr int HD = 128;
   std::uniform_real_distribution<float> dist(-1.f, 1.f);
-  std::vector<float> initial(HD * HD), got(HD * HD), ref(HD * HD);
-  std::vector<float> k(HD), q(HD), v(HD), sk(HD), d(HD), got_out(HD), ref_out(HD);
+  std::vector<float> initial(HD * HD), got(HD * HD), ref(HD * HD), decode(HD * HD);
+  std::vector<float> k(HD), q(HD), v(HD), sk(HD), d(HD), got_out(HD), ref_out(HD), decode_out(HD);
   for (float& x : initial) x = dist(rng);
   for (float& x : k) x = dist(rng);
   for (float& x : q) x = dist(rng);
   for (float& x : v) x = dist(rng);
-  got = ref = initial;
+  got = ref = decode = initial;
   float decay_value = 0.9876543f, b = 0.375f;
   const __m512 decay = _mm512_set1_ps(decay_value);
   for (int i = 0; i < HD; i++) {
@@ -253,6 +253,7 @@ static int test_gdn_recur_prefill(std::mt19937& rng) {
     }
     ref_out[i] = _mm512_reduce_add_ps(acc);
     got_out[i] = gdn_recur_row_prefill<HD>(got.data() + i * HD, k.data(), q.data(), v[i], b, decay);
+    decode_out[i] = gdn_recur_row_decode<HD>(decode.data() + i * HD, k.data(), q.data(), v[i], b, decay);
   }
   if (memcmp(got.data(), ref.data(), got.size() * sizeof(float)) != 0 ||
       memcmp(got_out.data(), ref_out.data(), got_out.size() * sizeof(float)) != 0) {
@@ -260,6 +261,12 @@ static int test_gdn_recur_prefill(std::mt19937& rng) {
     return 1;
   }
   printf("GDN-RECUR-PREFILL state/output: PASS\n");
+  if (memcmp(decode.data(), ref.data(), decode.size() * sizeof(float)) != 0 ||
+      memcmp(decode_out.data(), ref_out.data(), decode_out.size() * sizeof(float)) != 0) {
+    printf("GDN-RECUR-DECODE FAIL\n");
+    return 1;
+  }
+  printf("GDN-RECUR-DECODE state/output: PASS\n");
   return 0;
 }
 

@@ -300,6 +300,56 @@ static inline float attn_qk_prefill(const float* q, const float* k, int len, int
 }
 
 template <int HD>
+static inline float gdn_recur_row_decode(float* sr, const float* k, const float* q,
+                                         float v, float b, __m512 decay) {
+  static_assert(HD == 128);
+  __m512 s0 = _mm512_mul_ps(_mm512_loadu_ps(sr), decay);
+  __m512 s1 = _mm512_mul_ps(_mm512_loadu_ps(sr + 16), decay);
+  __m512 s2 = _mm512_mul_ps(_mm512_loadu_ps(sr + 32), decay);
+  __m512 s3 = _mm512_mul_ps(_mm512_loadu_ps(sr + 48), decay);
+  __m512 s4 = _mm512_mul_ps(_mm512_loadu_ps(sr + 64), decay);
+  __m512 s5 = _mm512_mul_ps(_mm512_loadu_ps(sr + 80), decay);
+  __m512 s6 = _mm512_mul_ps(_mm512_loadu_ps(sr + 96), decay);
+  __m512 s7 = _mm512_mul_ps(_mm512_loadu_ps(sr + 112), decay);
+  __m512 acc = _mm512_setzero_ps();
+  acc = _mm512_fmadd_ps(s0, _mm512_loadu_ps(k), acc);
+  acc = _mm512_fmadd_ps(s1, _mm512_loadu_ps(k + 16), acc);
+  acc = _mm512_fmadd_ps(s2, _mm512_loadu_ps(k + 32), acc);
+  acc = _mm512_fmadd_ps(s3, _mm512_loadu_ps(k + 48), acc);
+  acc = _mm512_fmadd_ps(s4, _mm512_loadu_ps(k + 64), acc);
+  acc = _mm512_fmadd_ps(s5, _mm512_loadu_ps(k + 80), acc);
+  acc = _mm512_fmadd_ps(s6, _mm512_loadu_ps(k + 96), acc);
+  acc = _mm512_fmadd_ps(s7, _mm512_loadu_ps(k + 112), acc);
+  const __m512 d = _mm512_set1_ps((v - _mm512_reduce_add_ps(acc)) * b);
+  acc = _mm512_setzero_ps();
+  s0 = _mm512_fmadd_ps(_mm512_loadu_ps(k), d, s0);
+  _mm512_storeu_ps(sr, s0);
+  acc = _mm512_fmadd_ps(s0, _mm512_loadu_ps(q), acc);
+  s1 = _mm512_fmadd_ps(_mm512_loadu_ps(k + 16), d, s1);
+  _mm512_storeu_ps(sr + 16, s1);
+  acc = _mm512_fmadd_ps(s1, _mm512_loadu_ps(q + 16), acc);
+  s2 = _mm512_fmadd_ps(_mm512_loadu_ps(k + 32), d, s2);
+  _mm512_storeu_ps(sr + 32, s2);
+  acc = _mm512_fmadd_ps(s2, _mm512_loadu_ps(q + 32), acc);
+  s3 = _mm512_fmadd_ps(_mm512_loadu_ps(k + 48), d, s3);
+  _mm512_storeu_ps(sr + 48, s3);
+  acc = _mm512_fmadd_ps(s3, _mm512_loadu_ps(q + 48), acc);
+  s4 = _mm512_fmadd_ps(_mm512_loadu_ps(k + 64), d, s4);
+  _mm512_storeu_ps(sr + 64, s4);
+  acc = _mm512_fmadd_ps(s4, _mm512_loadu_ps(q + 64), acc);
+  s5 = _mm512_fmadd_ps(_mm512_loadu_ps(k + 80), d, s5);
+  _mm512_storeu_ps(sr + 80, s5);
+  acc = _mm512_fmadd_ps(s5, _mm512_loadu_ps(q + 80), acc);
+  s6 = _mm512_fmadd_ps(_mm512_loadu_ps(k + 96), d, s6);
+  _mm512_storeu_ps(sr + 96, s6);
+  acc = _mm512_fmadd_ps(s6, _mm512_loadu_ps(q + 96), acc);
+  s7 = _mm512_fmadd_ps(_mm512_loadu_ps(k + 112), d, s7);
+  _mm512_storeu_ps(sr + 112, s7);
+  acc = _mm512_fmadd_ps(s7, _mm512_loadu_ps(q + 112), acc);
+  return _mm512_reduce_add_ps(acc);
+}
+
+template <int HD>
 static inline float gdn_recur_row_prefill(float* sr, const float* k, const float* q,
                                           float v, float b, __m512 decay) {
   __m512 acc = _mm512_setzero_ps();

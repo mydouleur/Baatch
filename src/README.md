@@ -219,3 +219,9 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   但不同于默认 CPU，不宣称跨数值语义一致。最终稳定 M1 smoke 的 8 个 CPU reference
   全 PASS、640 次 NPU 调用 0 flake，无 timeout/reset。25ms decode、长 prompt 数千 tok/s、
   MTP、旧 M2 根因、高频 Runner 重建零块及 imatrix/PPL/任务质量均未闭合。
+- 2026-11-04 decode GDN 状态行使用 8 个 ZMM 保留 128 维衰减结果，消除中间写回/重读，
+  每行状态流量由 2 读 2 写降为 1 读 1 写，FMA 与归约顺序不变。旧实现逐位 reference、
+  标准 tests PASS，layer0 HEAD/候选输出逐字节一致。30 层两核同进程 60 轮微基准
+  1.9285→1.6414ms（耗时 -14.89%），全模型 state 分项由 HEAD 4.75/4.81ms 降至
+  4.41/4.35ms；固定 65+64 三组总时近中性，不宣称端到端净提速。OUT_IDS 一致、0 flake，
+  25ms/token 未达到。
