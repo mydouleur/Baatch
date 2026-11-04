@@ -300,3 +300,14 @@ writer 侧改成"专家 3D 张量拆成按专家独立目录项（或加 per-exp
   所有 OUT_IDS 一致、0 flake，24 次完整运行无 timeout/reset；标准 tests 均 PASS。
   原型条件变量唤醒问题已在性能复测前修复，`CPU_DECODE_SMT`、四逻辑线程 Pool 与调用端
   改动随后全部撤回；默认仍两线程，prefill/MTP/量化格式/NPU 协议及 shared worker affinity 不变。
+- 2026-11-05 decode out_proj 单行 XBF4 双累加链仅完成原型并撤回：把 direct_routed 的
+  偶/奇两条独立 VNNI 链与一次 16 位 BF16 scale 读取适配到 66B/128 块 out 专用内核，
+  保持两核、双块展开、逐块 BF16 最近偶数转换与累加顺序，不改通用投影、lm_head、MoE、
+  prefill、MTP 或量化格式。真实 40 层同进程两轮各 60 样本微基准均值
+  4.413758→4.488182ms（+1.686%），1146.88 万个输出逐位 PASS。固定 65+64 十二轮
+  HEAD/候选平均总时延 53.1352→53.8285ms（+1.305%，18.820→18.578 tok/s），
+  平均中位 44.6958→45.4542ms、平均 nearest-rank p95 51.2000→49.6083ms；
+  out 4.5038→5.7357ms（+27.352%），仅 4/12 轮总时延下降。OUT_IDS 全一致、
+  0 flake、无 timeout/reset，标准 tests 均 PASS。候选源码、编译开关及新增单测全部
+  撤回，默认 out 与 direct_routed 已验证双链各自保持不变；routed 的约 5% GEMV 收益
+  不能转化为 out 总时延收益，不重复该变体。
